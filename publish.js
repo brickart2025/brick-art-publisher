@@ -25,7 +25,7 @@ app.use(express.json({ limit: "10mb" })); // because we send base64 images
 
 // >>>> FILL THESE IN <<<<
 const SHOP_DOMAIN = "ek4iwc-kq.myshopify.com";
-const SHOPIFY_ADMIN_TOKEN = "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";
+const SHOPIFY_ADMIN_TOKEN = process.env.SHOPIFY_ADMIN_TOKEN;
 const BLOG_ID = "91651211375"; // numeric string, like "91651211375"
 
 // Helper: upload one base64 PNG to Shopify Files via Admin GraphQL
