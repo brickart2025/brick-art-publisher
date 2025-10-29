@@ -1,23 +1,119 @@
 // api/submit.js
-// Serverless function for Vercel
-// Receives mosaic submission JSON and turns it into a Shopify blog post.
+//
+// Brick Art Publisher endpoint
+// Receives mosaic submission JSON, uploads images to Shopify Files, then
+// creates a blog post in the Brick Art Gallery blog.
+//
+// Environment variables required (in Vercel / .env):
+//   SHOPIFY_STORE_DOMAIN       e.g. "ek4iwc-kq.myshopify.com"
+//   SHOPIFY_ADMIN_API_TOKEN    Admin API access token (private)
+//   BLOG_ID                    numeric blog id for "Brick Art Gallery"
 
-import { axiosPost } from "./axios-lite.js";
+const SHOPIFY_STORE_DOMAIN = process.env.SHOPIFY_STORE_DOMAIN;
+const SHOPIFY_ADMIN_API_TOKEN = process.env.SHOPIFY_ADMIN_API_TOKEN;
+const BLOG_ID = process.env.BLOG_ID;
 
-// --- env helpers -------------------------------------------------
-function requireEnv(key) {
-  const value = process.env[key];
+// simple required-env guard
+function requireEnv(name, value) {
   if (!value) {
-    throw new Error(`Missing required env var: ${key}`);
+    throw new Error(`Missing required env var: ${name}`);
   }
   return value;
 }
 
-const SHOPIFY_STORE_DOMAIN = requireEnv("SHOPIFY_STORE_DOMAIN"); // e.g. ek4iwc-kq.myshopify.com
-const SHOPIFY_ADMIN_API_TOKEN = requireEnv("SHOPIFY_ADMIN_API_TOKEN"); // Admin API token
-const BLOG_ID = requireEnv("BLOG_ID"); // numeric blog id as a string, e.g. "91651211375"
+// helper: upload ONE base64 image to Shopify Files and return its CDN URL
+async function uploadSingleImageToShopify({ b64, altText, filename }) {
+  if (!b64 || !b64.trim()) {
+    return "";
+  }
 
-// --- utility: build the blog post HTML ---------------------------
+  const graphqlEndpoint = `https://${requireEnv(
+    "SHOPIFY_STORE_DOMAIN",
+    SHOPIFY_STORE_DOMAIN
+  )}/admin/api/2024-07/graphql.json`;
+
+  // GraphQL mutation for fileCreate
+  const mutation = `
+    mutation fileCreate($files: [FileCreateInput!]!) {
+      fileCreate(files: $files) {
+        files {
+          ... on MediaImage {
+            id
+            alt
+            image {
+              url
+            }
+            preview {
+              image {
+                url
+              }
+            }
+            previewImage {
+              url
+            }
+          }
+        }
+        userErrors {
+          field
+          message
+        }
+      }
+    }
+  `;
+
+  // variables payload to send
+  const variables = {
+    files: [
+      {
+        alt: altText || "Brick Art mosaic",
+        contentType: "IMAGE",
+        originalSource: `data:image/png;base64,${b64}`,
+        filename: filename || "brick-art.png",
+      },
+    ],
+  };
+
+  // Call Shopify GraphQL Admin API
+  const resp = await fetch(graphqlEndpoint, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Shopify-Access-Token": requireEnv(
+        "SHOPIFY_ADMIN_API_TOKEN",
+        SHOPIFY_ADMIN_API_TOKEN
+      ),
+    },
+    body: JSON.stringify({ query: mutation, variables }),
+  });
+
+  const data = await resp.json();
+
+  // basic error logging for debugging
+  if (!resp.ok) {
+    console.error("fileCreate HTTP error:", resp.status, resp.statusText, data);
+    return "";
+  }
+  if (data.errors) {
+    console.error("fileCreate GraphQL errors:", data.errors);
+  }
+
+  const userErrors = data?.data?.fileCreate?.userErrors || [];
+  if (userErrors.length > 0) {
+    console.error("fileCreate userErrors:", userErrors);
+  }
+
+  // try a few possible locations Shopify might put the URL
+  const fileNode = data?.data?.fileCreate?.files?.[0];
+  const cdnUrl =
+    fileNode?.image?.url ||
+    fileNode?.previewImage?.url ||
+    fileNode?.preview?.image?.url ||
+    "";
+
+  return cdnUrl;
+}
+
+// helper: build the HTML body for the blog post
 function buildArticleHTML({
   nickname,
   category,
@@ -28,41 +124,41 @@ function buildArticleHTML({
   cleanUrl,
   logoUrl,
 }) {
-  // Make a <li> list if we have brickCounts
-  let brickList = "";
-  if (brickCounts && typeof brickCounts === "object") {
-    const entries = Object.entries(brickCounts); // [["black",300], ...]
-    if (entries.length > 0) {
-      brickList =
-        "<p><strong>Brick Breakdown:</strong></p><ul>" +
-        entries
-          .map(
-            ([color, count]) =>
-              `<li>${color.charAt(0).toUpperCase() + color.slice(1)} – ${count}</li>`
-          )
-          .join("") +
-        "</ul>";
-    }
-  }
+  // brick breakdown as <ul>
+  const brickList = brickCounts
+    ? `<p><strong>Brick Breakdown:</strong></p>
+       <ul>
+         ${Object.entries(brickCounts)
+           .map(([color, count]) => {
+             const nice =
+               color.charAt(0).toUpperCase() + color.slice(1).toLowerCase();
+             return `<li>${nice}: ${count}</li>`;
+           })
+           .join("")}
+       </ul>`
+    : "";
 
-  // Clean/original mosaic image block
+  // block for original mosaic image
   const cleanBlock = cleanUrl
     ? `
       <p><strong>Original Mosaic:</strong></p>
-      <p><img src="${cleanUrl}" alt="Original mosaic by ${nickname || "artist"}"
-      style="max-width:100%; height:auto;" /></p>
+      <p><img src="${cleanUrl}"
+              alt="Original mosaic by ${nickname || "artist"}"
+              style="max-width:100%; height:auto;" /></p>
     `
     : "";
 
-  // Branded / logo mosaic block
+  // block for branded / logo mosaic image
   const logoBlock = logoUrl
     ? `
       <p><strong>Branded Mosaic:</strong></p>
-      <p><img src="${logoUrl}" alt="Branded mosaic by ${nickname || "artist"}"
-      style="max-width:100%; height:auto;" /></p>
+      <p><img src="${logoUrl}"
+              alt="Branded mosaic by ${nickname || "artist"}"
+              style="max-width:100%; height:auto;" /></p>
     `
     : "";
 
+  // final HTML
   return `
     <p><strong>Artist:</strong> ${nickname || "Unknown Artist"}</p>
     <p><strong>Category:</strong> ${category || "Uncategorized"}</p>
@@ -71,21 +167,70 @@ function buildArticleHTML({
     <p><strong>Total Bricks:</strong> ${totalBricks || "Unknown"}</p>
 
     ${brickList}
-
     ${cleanBlock}
     ${logoBlock}
   `;
 }
 
-// --- handler (Vercel style) --------------------------------------
-export default async function handler(req, res) {
-  // Only allow POST
-  if (req.method !== "POST") {
-    return res.status(405).json({ ok: false, error: "Method not allowed" });
+// helper: create Shopify blog article via REST Admin API
+async function createShopifyArticle({ title, html, tags }) {
+  const adminEndpoint = `https://${requireEnv(
+    "SHOPIFY_STORE_DOMAIN",
+    SHOPIFY_STORE_DOMAIN
+  )}/admin/api/2024-07/blogs/${requireEnv("BLOG_ID", BLOG_ID)}/articles.json`;
+
+  const bodyPayload = {
+    article: {
+      title,
+      author: "Shopify API",
+      tags: tags || [],
+      body_html: html,
+      published: false, // keep it hidden for manual approval
+    },
+  };
+
+  const resp = await fetch(adminEndpoint, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Shopify-Access-Token": requireEnv(
+        "SHOPIFY_ADMIN_API_TOKEN",
+        SHOPIFY_ADMIN_API_TOKEN
+      ),
+    },
+    body: JSON.stringify(bodyPayload),
+  });
+
+  const data = await resp.json();
+
+  if (!resp.ok) {
+    console.error("Article create HTTP error:", resp.status, resp.statusText, data);
+    throw new Error(
+      `Failed to create article: ${resp.status} ${resp.statusText}`
+    );
   }
 
+  return data?.article;
+}
+
+// the actual route handler Vercel will call
+export default async function handler(req, res) {
   try {
-    // pull fields from request body
+    // Only POST is allowed
+    if (req.method !== "POST") {
+      return res.status(405).json({
+        ok: false,
+        error: "Method not allowed. Use POST.",
+      });
+    }
+
+    // Parse JSON body. On Vercel Node runtime, req.body may already be parsed,
+    // but we'll handle both cases safely.
+    const payload =
+      typeof req.body === "object" && req.body !== null
+        ? req.body
+        : JSON.parse(req.body || "{}");
+
     const {
       nickname,
       category,
@@ -96,108 +241,30 @@ export default async function handler(req, res) {
       imageClean_b64,
       imageLogo_b64,
       timestamp,
-    } = req.body || {};
+    } = payload;
 
-    // sanity check: we at least need nickname, etc.
+    // basic validation: we at least want a nickname and timestamp
     if (!nickname || !timestamp) {
       return res
         .status(400)
         .json({ ok: false, error: "Missing required fields (nickname/timestamp)" });
     }
 
-    // 1. Upload images to Shopify Files via GraphQL --------------------------------
-    // Build Shopify GraphQL mutation payload.
-    // We only include each file block if we actually got base64 data.
-    const filesInput = [];
+    // 1. Upload both images (if present) to Shopify Files.
+    const cleanUrl = await uploadSingleImageToShopify({
+      b64: imageClean_b64,
+      altText: `Original mosaic by ${nickname}`,
+      filename: `${nickname || "mosaic"}-clean.png`,
+    });
 
-    if (imageClean_b64 && imageClean_b64.trim() !== "") {
-      filesInput.push({
-        alt: `Brick Art clean mosaic`,
-        contentType: "IMAGE",
-        originalSource: `data:image/png;base64,${imageClean_b64}`,
-      });
-    }
+    const logoUrl = await uploadSingleImageToShopify({
+      b64: imageLogo_b64,
+      altText: `Branded mosaic by ${nickname}`,
+      filename: `${nickname || "mosaic"}-logo.png`,
+    });
 
-    if (imageLogo_b64 && imageLogo_b64.trim() !== "") {
-      filesInput.push({
-        alt: `Brick Art branded mosaic`,
-        contentType: "IMAGE",
-        originalSource: `data:image/png;base64,${imageLogo_b64}`,
-      });
-    }
-
-    let cleanUrl = "";
-    let logoUrl = "";
-
-    if (filesInput.length > 0) {
-      // GraphQL mutation string
-      const gqlMutation = `
-        mutation fileCreate($files: [FileCreateInput!]!) {
-          fileCreate(files: $files) {
-            files {
-              preview {
-                image {
-                  url
-                }
-              }
-            }
-            userErrors {
-              field
-              message
-            }
-          }
-        }
-      `;
-
-      // Build request body for Shopify GraphQL Admin API
-      const gqlBody = {
-        query: gqlMutation,
-        variables: {
-          files: filesInput,
-        },
-      };
-
-      // Send to Shopify GraphQL
-      const uploadResp = await axiosPost(
-        `https://${SHOPIFY_STORE_DOMAIN}/admin/api/2024-07/graphql.json`,
-        gqlBody,
-        {
-          "X-Shopify-Access-Token": SHOPIFY_ADMIN_API_TOKEN,
-        }
-      );
-
-      if (!uploadResp.ok) {
-        return res.status(500).json({
-          ok: false,
-          step: "fileCreate",
-          status: uploadResp.status,
-          error: uploadResp.data,
-        });
-      }
-
-      // unpack URLs
-      // structure: data.fileCreate.files[x].preview.image.url
-      try {
-        const createdFiles = uploadResp.data.data.fileCreate.files || [];
-        if (createdFiles[0]) {
-          cleanUrl =
-            createdFiles[0].preview?.image?.url ||
-            createdFiles[0].image?.url ||
-            "";
-        }
-        if (createdFiles[1]) {
-          logoUrl =
-            createdFiles[1].preview?.image?.url ||
-            createdFiles[1].image?.url ||
-            "";
-        }
-      } catch (e) {
-        // swallow parse errors, keep URLs blank if we can't parse
-      }
-    }
-
-    // 2. Build HTML body for the blog post -----------------------------------------
-    const article_html = buildArticleHTML({
+    // 2. Build the blog article HTML with text + images
+    const html = buildArticleHTML({
       nickname,
       category,
       grid,
@@ -208,66 +275,34 @@ export default async function handler(req, res) {
       logoUrl,
     });
 
-    // Title for blog post
-    // Example: "Test Artist – 2025-10-28 15:00"
-    const article_title = `${nickname} – ${timestamp}`;
-
-    // Tags (comma-separated or array)
-    // We’ll generate some simple tags
-    const tagsArr = [
+    // 3. Create the Shopify article (hidden / unpublished)
+    const title = `${nickname} – ${timestamp}`;
+    // tags: category, grid, baseplate for filtering in gallery later
+    const tags = [
       category || "Uncategorized",
-      `${grid}x${grid}`,
-      baseplate || "Unknown Baseplate",
-    ];
-    const tagsStr = tagsArr.join(", ");
+      grid || "",
+      baseplate || "",
+    ].filter(Boolean);
 
-    // 3. Create Shopify Blog Article via REST Admin API ----------------------------
-    const articlePayload = {
-      article: {
-        title: article_title,
-        body_html: article_html,
-        tags: tagsStr,
-        published_at: null, // draft/unpublished
-      },
-    };
+    const article = await createShopifyArticle({
+      title,
+      html,
+      tags,
+    });
 
-    const articleResp = await axiosPost(
-      `https://${SHOPIFY_STORE_DOMAIN}/admin/api/2024-07/blogs/${BLOG_ID}/articles.json`,
-      articlePayload,
-      {
-        "X-Shopify-Access-Token": SHOPIFY_ADMIN_API_TOKEN,
-      }
-    );
-
-    if (!articleResp.ok) {
-      return res.status(500).json({
-        ok: false,
-        step: "createArticle",
-        status: articleResp.status,
-        error: articleResp.data,
-      });
-    }
-
-    // Shopify REST returns { article: {...} }
-    const createdArticle = articleResp.data.article || {};
-
-    // 4. Respond success -----------------------------------------------------------
+    // success response
     return res.status(200).json({
       ok: true,
-      blog_id: BLOG_ID,
-      article_id: createdArticle.id,
-      article_handle: createdArticle.handle,
-      article_admin_url: `https://${SHOPIFY_STORE_DOMAIN}/admin/blogs/${BLOG_ID}/articles/${createdArticle.id}`,
-      preview_image_clean: cleanUrl,
-      preview_image_logo: logoUrl,
+      blog_id: article?.blog_id,
+      article_id: article?.id,
+      article_handle: article?.handle,
+      article_admin_url: `https://${SHOPIFY_STORE_DOMAIN}/admin/blogs/${article?.blog_id}/articles/${article?.id}`,
     });
   } catch (err) {
-    // Catch truly unexpected errors (missing env, etc.)
-    console.error("submit.js fatal error:", err);
+    console.error("Handler error:", err);
     return res.status(500).json({
       ok: false,
-      error: err.message || err.toString(),
-      stack: err.stack || null,
+      error: err.message || "Internal server error",
     });
   }
 }
