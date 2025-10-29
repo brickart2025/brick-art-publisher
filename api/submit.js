@@ -33,33 +33,23 @@ async function uploadSingleImageToShopify({ b64, altText, filename }) {
   )}/admin/api/2024-07/graphql.json`;
 
   // GraphQL mutation for fileCreate
-  const mutation = `
-    mutation fileCreate($files: [FileCreateInput!]!) {
-      fileCreate(files: $files) {
-        files {
-          ... on MediaImage {
-            id
-            alt
-            image {
-              url
-            }
-            preview {
-              image {
-                url
-              }
-            }
-            previewImage {
-              url
-            }
-          }
-        }
-        userErrors {
-          field
-          message
-        }
-      }
-    }
-  `;
+  curl -X POST https://brick-art-publisher.vercel.app/api/submit \
+-H "Content-Type: application/json" \
+--data '{
+  "nickname": "Image Test Artist",
+  "category": "Testing",
+  "grid": "48x48",
+  "baseplate": "Gray 48x48",
+  "totalBricks": 100,
+  "brickCounts": {
+    "white": 50,
+    "black": 50
+  },
+  "imageClean_b64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIW2P4z/C/HwAFgwJ/lc99XwAAAABJRU5ErkJggg==",
+  "imageLogo_b64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIW2P4z/C/HwAFgwJ/lc99XwAAAABJRU5ErkJggg==",
+  "timestamp": "2025-10-29 12:00"
+}'
+
 
   // variables payload to send
   const variables = {
