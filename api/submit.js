@@ -32,38 +32,37 @@ async function uploadSingleImageToShopify({ b64, altText, filename }) {
     SHOPIFY_STORE_DOMAIN
   )}/admin/api/2024-07/graphql.json`;
 
-  // GraphQL mutation for fileCreate
-  curl -X POST https://brick-art-publisher.vercel.app/api/submit \
--H "Content-Type: application/json" \
---data '{
-  "nickname": "Image Test Artist",
-  "category": "Testing",
-  "grid": "48x48",
-  "baseplate": "Gray 48x48",
-  "totalBricks": 100,
-  "brickCounts": {
-    "white": 50,
-    "black": 50
-  },
-  "imageClean_b64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIW2P4z/C/HwAFgwJ/lc99XwAAAABJRU5ErkJggg==",
-  "imageLogo_b64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIW2P4z/C/HwAFgwJ/lc99XwAAAABJRU5ErkJggg==",
-  "timestamp": "2025-10-29 12:00"
-}'
+  const mutation = `
+    mutation fileCreate($files: [FileCreateInput!]!) {
+      fileCreate(files: $files) {
+        files {
+          ... on MediaImage {
+            id
+            alt
+            image {
+              url
+            }
+          }
+        }
+        userErrors {
+          field
+          message
+        }
+      }
+    }
+  `;
 
-
-  // variables payload to send
   const variables = {
     files: [
       {
         alt: altText || "Brick Art mosaic",
         contentType: "IMAGE",
-        originalSource: `data:image/png;base64,${b64}`,
+        originalSource: \`data:image/png;base64,\${b64}\`,
         filename: filename || "brick-art.png",
       },
     ],
   };
 
-  // Call Shopify GraphQL Admin API
   const resp = await fetch(graphqlEndpoint, {
     method: "POST",
     headers: {
@@ -78,11 +77,11 @@ async function uploadSingleImageToShopify({ b64, altText, filename }) {
 
   const data = await resp.json();
 
-  // basic error logging for debugging
   if (!resp.ok) {
     console.error("fileCreate HTTP error:", resp.status, resp.statusText, data);
     return "";
   }
+
   if (data.errors) {
     console.error("fileCreate GraphQL errors:", data.errors);
   }
@@ -92,14 +91,8 @@ async function uploadSingleImageToShopify({ b64, altText, filename }) {
     console.error("fileCreate userErrors:", userErrors);
   }
 
-  // try a few possible locations Shopify might put the URL
   const fileNode = data?.data?.fileCreate?.files?.[0];
-  const cdnUrl =
-    fileNode?.image?.url ||
-    fileNode?.previewImage?.url ||
-    fileNode?.preview?.image?.url ||
-    "";
-
+  const cdnUrl = fileNode?.image?.url || "";
   return cdnUrl;
 }
 
