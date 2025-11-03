@@ -68,22 +68,31 @@ export default async function handler(req, res) {
       return fetch(url, { ...init, headers });
     };
 
-    // --- 7) Upload a base64 PNG to Shopify Files ---
-    const uploadFile = async (b64, filename) => {
-      if (!b64) return null;
-      const body = { file: { attachment: b64, filename, mime_type: "image/png" } };
-      const r = await shopifyFetch(`/files.json`, {
-        method: "POST",
-        body: JSON.stringify(body),
-      });
-      const j = await r.json();
-      if (!r.ok) {
-        console.error("File upload failed", r.status, j);
-        throw new Error(`File upload failed: ${r.status}`);
-      }
-      // Shopify may return {file} or {files:[...]} depending on version
-      return j.file?.url || j.files?.[0]?.url || null;
-    };
+  // --- 7) Upload a base64 PNG to Shopify Files ---
+const uploadFile = async (b64, filename) => {
+  if (!b64) return null;
+  const body = { file: { attachment: b64, filename, mime_type: "image/png" } };
+
+  const r = await shopifyFetch(`/files.json`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
+  let j = null;
+  try {
+    j = await r.json(); // try parsing JSON if body exists
+  } catch (e) {
+    console.error("[BrickArt] Shopify upload: response not JSON", e);
+  }
+
+  if (!r.ok) {
+    console.error("[BrickArt] File upload failed:", r.status, j || await r.text());
+    throw new Error(`File upload failed: ${r.status}`);
+  }
+
+  console.log("[BrickArt] File upload success", j);
+  return j?.file?.url || j?.files?.[0]?.url || null;
+};
 
     // --- 8) Helpers for article content ---
     const esc = (s = "") =>
