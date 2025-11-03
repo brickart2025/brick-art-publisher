@@ -72,7 +72,7 @@ export default async function handler(req, res) {
 const uploadFile = async (b64, filename) => {
   if (!b64) return null;
 
-  const body = { file: { attachment: b64, filename, mime_type: "image/png" } };
+  const body = { file: { content: b64, filename, mime_type: "image/png" } };
 
   // If your helper already prefixes /admin/api/<version>, keep just `/files.json` here
   const r = await shopifyFetch(`/files.json`, {
