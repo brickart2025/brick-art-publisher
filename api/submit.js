@@ -62,51 +62,51 @@ export default async function handler(req, res) {
     return fetch(url, { ...init, headers });
   }
 
-  // Helper: upload base64 PNG to Files API, return hosted URL
-  const uploadFile = async (b64, filename) => {
-    if (!b64) return null; // safe no-op when an image wasn't provided
+  // Upload a base64 PNG to Shopify Files and return the hosted URL
+const uploadFile = async (b64, filename) => {
+  if (!b64) return null;
 
-    // Shopify expects: { file: { attachment: <base64>, filename, mime_type } }
-    const body = {
-      file: {
-        attachment: b64,            // RAW base64 (no data: prefix)
-        filename,
-        mime_type: "image/png",
-      },
-    };
-
-    const r = await shopifyFetch("/files.json", {
-      method: "POST",
-      body: JSON.stringify(body),
-    });
-
-    // Read body ONCE then parse
-    const text = await r.text();
-    if (!text?.trim()) {
-      console.warn("[BrickArt] Shopify upload: empty response body");
-    }
-
-    let json = null;
-    try {
-      json = text ? JSON.parse(text) : {};
-    } catch (e) {
-      console.error("[BrickArt] Shopify upload: response not JSON", e);
-      throw new Error(`Upload response not JSON (status ${r.status})`);
-    }
-
-    if (!r.ok) {
-      console.error("[BrickArt] File upload failed", {
-        status: r.status,
-        statusText: r.statusText,
-        bodyPreview: text.slice(0, 500),
-      });
-      throw new Error(`File upload failed: ${r.status} ${r.statusText}`);
-    }
-
-    const url = json?.file?.url || null;
-    console.log("[BrickArt] File upload success", { url });
-    return url;
+  const body = {
+    file: {
+      content: b64,             // ✅ NEW: use 'content' not 'attachment'
+      filename,
+      file_type: "IMAGE",       // ✅ NEW: required by newer API versions
+      mime_type: "image/png",
+    },
   };
+
+  const r = await shopifyFetch("/files.json", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
+  const text = await r.text();
+  if (!text?.trim()) {
+    console.warn("[BrickArt] Shopify upload: empty response body");
+  }
+
+  let json = null;
+  try {
+    json = text ? JSON.parse(text) : {};
+  } catch (e) {
+    console.error("[BrickArt] Shopify upload: response not JSON", e);
+    throw new Error(`Upload response not JSON (status ${r.status})`);
+  }
+
+  if (!r.ok) {
+    console.error("[BrickArt] File upload failed", {
+      status: r.status,
+      statusText: r.statusText,
+      bodyPreview: text.slice(0, 500),
+    });
+    throw new Error(`File upload failed: ${r.status} ${r.statusText}`);
+  }
+
+  const url = json?.file?.url || null;
+  console.log("[BrickArt] File upload success", { url });
+  return url;
+};
+
 
   // Small helpers
   const okStr = (v) => v && typeof v === "string" && v.trim().length > 0;
@@ -214,4 +214,3 @@ export default async function handler(req, res) {
     });
   }
 }
-
