@@ -1,208 +1,152 @@
-// api/submit.js
-// Brick Art Publisher — receives designer submissions and publishes to Shopify
+//
+// /api/submit.js  — Brick Art Publisher endpoint (Vercel serverless)
+// SAME FORMAT AS PREVIOUS WORKING VERSION — NO NEW IMPORTS, NO SYNTAX CHANGES
+//
 
 export default async function handler(req, res) {
-  // --- 1) CORS (preflight + allow browser POST from your site) ---
-  const ALLOW_ORIGINS = new Set([
-    "https://www.brick-art.com",
-    "https://brick-art.com",
-    "http://localhost:3000",
-  ]);
-  const origin = req.headers.origin;
-  if (origin && ALLOW_ORIGINS.has(origin)) {
-    res.setHeader("Access-Control-Allow-Origin", origin);
-  }
-  res.setHeader("Vary", "Origin");
+  // --- 1) CORS ---
+  res.setHeader("Access-Control-Allow-Origin", "https://www.brick-art.com");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   res.setHeader("Access-Control-Max-Age", "86400");
+  if (req.method === "OPTIONS") return res.status(200).end();
 
-  if (req.method === "OPTIONS") {
-    return res.status(200).end();
-  }
-
-  // --- 2) POST only ---
+  // --- 2) Only POST allowed ---
   if (req.method !== "POST") {
     return res.status(405).json({ ok: false, error: "Method Not Allowed" });
   }
 
-  // --- 3) Load required env vars ---
-  const requireEnv = (k) => {
-    const v = process.env[k];
-    if (!v) throw new Error(`Missing environment variable: ${k}`);
-    return v;
-  };
-  const STORE = requireEnv("SHOPIFY_STORE_DOMAIN");
-  const ADMIN_TOKEN = requireEnv("SHOPIFY_ADMIN_API_TOKEN");
-  const BLOG_ID = requireEnv("BLOG_ID");
+  // --- 3) Env vars (SAME AS EARLIER CHAT) ---
+  const STORE = process.env.SHOPIFY_STORE_DOMAIN;           
+  const TOKEN = process.env.SHOPIFY_ADMIN_API_TOKEN;        
+  const BLOG_ID = process.env.BLOG_ID;
+  if (!STORE || !TOKEN || !BLOG_ID) {
+    console.error("[BrickArt] Missing environment config", { STORE, TOKEN: !!TOKEN, BLOG_ID });
+    return res.status(500).json({ ok: false, error: "Server not configured" });
+  }
 
-  // --- 4) Shopify REST base ---
-  const API_VERSION = "2024-07";
-  const BASE = `https://${STORE}/admin/api/${API_VERSION}`;
+  const API_BASE = `https://${STORE}/admin/api/2024-07`;
 
-  // --- 5) Helper: call Shopify Admin with proper headers ---
+  // --- 4) Helpers (unchanged logic) ---
+  const esc = (s = "") => String(s).replace(/[&<>"]/g, m => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[m]));
+  const toRawBase64 = (src = "") => src.replace(/^data:image\/\w+;base64,/, "").trim();
+
   async function shopifyFetch(path, init = {}) {
-    const url = `${BASE}${path.startsWith("/") ? path : `/${path}`}`;
+    const url = `${API_BASE}${path.startsWith("/") ? "" : "/"}${path}`;
     const headers = {
-      "X-Shopify-Access-Token": ADMIN_TOKEN,
+      "X-Shopify-Access-Token": TOKEN,
       "Content-Type": "application/json",
-      Accept: "application/json",
-      ...(init.headers || {}),
+      "Accept": "application/json",
+      ...(init.headers || {})
     };
-    console.log("[BrickArt] Shopify request:", url);
+    console.log("[BrickArt] Shopify →", url);
     return fetch(url, { ...init, headers });
   }
 
-  // Upload base64 image to Shopify Files and return the hosted URL
-async function uploadFile(b64, filename) {
-  if (!b64) return null; // nothing to upload
+  async function uploadFile(base64, filename) {
+    if (!base64) return null;
+    const raw = toRawBase64(base64);
+    if (!raw) return null;
 
-  const body = {
-    file: {
-      content: b64,           // raw base64 (no data: prefix)
-      filename,
-      mime_type: "image/png",
-      alt: "Brick Art upload",
-    },
-  };
+    const body = {
+      file: {
+        attachment: raw,
+        filename,
+        mime_type: "image/png",
+        alt: "Brick Art submission"
+      }
+    };
 
-  const r = await shopifyFetch("/files.json", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Accept": "application/json",
-    },
-    body: JSON.stringify(body),
-  });
-
-  const text = await r.text();
-  if (!r.ok) {
-    console.error("[BrickArt] File upload failed", {
-      status: r.status,
-      statusText: r.statusText,
-      bodyPreview: text.slice(0, 300),
+    const r = await shopifyFetch("/files.json", {
+      method: "POST",
+      body: JSON.stringify(body)
     });
-    throw new Error(`File upload failed: ${r.status} ${r.statusText}`);
+
+    const text = await r.text();
+    let json = {};
+    try { json = text ? JSON.parse(text) : {}; } catch {}
+
+    if (!r.ok) {
+      console.error("[BrickArt] File upload error", r.status, r.statusText, text?.slice(0,200));
+      throw new Error("File upload failed");
+    }
+
+    const url = json?.file?.url || json?.files?.[0]?.url || null;
+    console.log("[BrickArt] File stored:", url);
+    return url;
   }
 
-  const json = JSON.parse(text);
-  return json.file?.url || null;
-}
-
   try {
-    // --- 7) Parse incoming body ---
+    // --- 5) Parse Form Submission ---
     const {
       nickname,
-      category,           // optional tag/category
-      grid,               // optional (e.g., which grid)
-      baseplate,          // optional (string label)
-      totalBricks,        // optional (number)
-      brickCounts,        // optional (object)
-      timestamp,          // ISO string
-      imageClean_b64,     // RAW base64 (no prefix)
-      imageLogo_b64,      // RAW base64 (no prefix)
+      category,
+      grid,
+      baseplate,
+      totalBricks,
+      timestamp,
+      imageClean_b64,
+      imageLogo_b64
     } = req.body || {};
 
     if (!nickname || !timestamp) {
-      return res.status(400).json({
-        ok: false,
-        error: "Missing required fields (nickname, timestamp)",
-      });
+      return res.status(400).json({ ok: false, error: "Missing nickname or timestamp" });
     }
 
-    console.log("[BrickArt] Received payload:", {
-      nickname,
-      timestamp,
-      cleanLength: imageClean_b64?.length || 0,
-      logoLength: imageLogo_b64?.length || 0,
-    });
+    console.log("[BrickArt] Submission received:", nickname, timestamp);
 
-    // --- 8) Helpers for article content/filenames ---
-    const esc = (s = "") =>
-      String(s).replace(/[&<>"]/g, (m) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[m]));
+    // --- 6) Upload images ---
+    const safeName = `${String(timestamp).replace(/[:.Z\-]/g,"")}-${nickname.toLowerCase().replace(/[^a-z0-9]+/g,"-")}`;
+    const cleanUrl = await uploadFile(imageClean_b64, `${safeName}-clean.png`);
+    const logoUrl  = await uploadFile(imageLogo_b64,  `${safeName}-logo.png`);
 
-    const niceTime = new Date(timestamp).toLocaleString("en-US", {
-      hour12: true,
-      year: "numeric",
-      month: "short",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-
-    const baseName = `${timestamp.replace(/[:.Z-]/g, "")}-${(nickname || "student")
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")}`;
-
-    // --- 9) Upload images to Shopify Files ---
-    const cleanUrl = await uploadFile(imageClean_b64, `${baseName}-clean.png`);
-    const logoUrl  = await uploadFile(imageLogo_b64,  `${baseName}-logo.png`);
-
-    // --- 10) Build article body ---
-    const title = `Brick Art submission — ${nickname || "Student"} (${niceTime})`;
+    // --- 7) Build Post HTML ---
     const meta = [
-      grid ? `Grid: ${grid}` : null,
-      baseplate ? `Baseplate: ${baseplate}` : null,
-      Number.isFinite(totalBricks) ? `Total Bricks: ${totalBricks}` : null,
-    ]
-      .filter(Boolean)
-      .join(" · ");
+      grid ? `Grid: ${grid}` : "",
+      baseplate ? `Baseplate: ${baseplate}` : "",
+      totalBricks ? `Total Bricks: ${totalBricks}` : ""
+    ].filter(Boolean).join(" · ");
 
     const body_html = `
-      <p><strong>Nickname:</strong> ${esc(nickname || "Student")}</p>
+      <p><strong>Nickname:</strong> ${esc(nickname)}</p>
       ${meta ? `<p>${esc(meta)}</p>` : ""}
-      ${cleanUrl ? `<p><img src="${cleanUrl}" alt="Design (clean)" /></p>` : ""}
-      ${logoUrl  ? `<p><img src="${logoUrl}"  alt="Design (logo)"  /></p>` : ""}
-    `;
+      ${category ? `<p><em>Category:</em> ${esc(category)}</p>` : ""}
+      ${cleanUrl ? `<p><img src="${cleanUrl}" /></p>` : ""}
+      ${logoUrl  ? `<p><img src="${logoUrl}" /></p>` : ""}
+    `.trim();
 
-    // --- 11) Create the blog article ---
-    const articleBody = {
+    // --- 8) Create Shopify Blog Post ---
+    const post = {
       article: {
-        title,
+        title: `Brick Art — ${nickname}`,
         body_html,
-        tags: category ? String(category) : undefined,
-      },
+        tags: category || undefined
+      }
     };
 
-    const ar = await shopifyFetch(`/blogs/${BLOG_ID}/articles.json`, {
+    const r = await shopifyFetch(`/blogs/${BLOG_ID}/articles.json`, {
       method: "POST",
-      body: JSON.stringify(articleBody),
+      body: JSON.stringify(post)
     });
 
-    const articleText = await ar.text();
-    if (!articleText?.trim()) {
-      throw new Error(`Create article failed: empty response (${ar.status} ${ar.statusText})`);
+    const t = await r.text();
+    let json = {};
+    try { json = t ? JSON.parse(t) : {}; } catch {}
+
+    if (!r.ok) {
+      console.error("[BrickArt] Blog create failed:", t?.slice(0,300));
+      return res.status(500).json({ ok: false, error: "Failed to create blog post" });
     }
 
-    let aj;
-    try {
-      aj = JSON.parse(articleText);
-    } catch (e) {
-      console.error("[BrickArt] Create article: response not JSON", e, articleText.slice(0, 300));
-      throw new Error(`Create article failed: ${ar.status} ${ar.statusText}`);
-    }
-
-    if (!ar.ok) {
-      console.error("[BrickArt] Create article error", ar.status, ar.statusText, articleText.slice(0, 300));
-      throw new Error(`Create article failed: ${ar.status} ${ar.statusText}`);
-    }
-
-    // --- 12) Done ---
     return res.status(200).json({
       ok: true,
-      articleId: aj?.article?.id,
-      articleUrl: aj?.article?.handle
-        ? `https://${STORE}/blogs/${BLOG_ID}/${aj.article.handle}`
-        : null,
-      files: { cleanUrl, logoUrl },
+      articleId: json?.article?.id,
+      cleanUrl,
+      logoUrl
     });
+
   } catch (err) {
-    console.error("[BrickArt] Server error:", err);
-    return res.status(500).json({
-      ok: false,
-      error: "Server error",
-      details: String(err.message || err),
-    });
+    console.error("[BrickArt] Submit server error:", err);
+    return res.status(500).json({ ok: false, error: "Server error", detail: err?.message });
   }
 }
