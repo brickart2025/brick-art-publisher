@@ -53,51 +53,41 @@ export default async function handler(req, res) {
     return fetch(url, { ...init, headers });
   }
 
-  // --- 6) Helper: upload a base64 PNG to Shopify Files, return hosted URL ---
-  async function uploadFile(b64, filename) {
-    if (!b64) return null; // nothing to upload
+  // Upload base64 image to Shopify Files and return the hosted URL
+async function uploadFile(b64, filename) {
+  if (!b64) return null; // nothing to upload
 
-    const body = {
-      file: {
-        content: b64,          // RAW base64 (no "data:image/png;base64," prefix)
-        filename,
-        file_type: "IMAGE",
-        mime_type: "image/png",
-        alt: "Brick Art upload",
-      },
-    };
+  const body = {
+    file: {
+      content: b64,           // raw base64 (no data: prefix)
+      filename,
+      mime_type: "image/png",
+      alt: "Brick Art upload",
+    },
+  };
 
-    const r = await shopifyFetch("/files.json", {
-      method: "POST",
-      body: JSON.stringify(body),
+  const r = await shopifyFetch("/files.json", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Accept": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+
+  const text = await r.text();
+  if (!r.ok) {
+    console.error("[BrickArt] File upload failed", {
+      status: r.status,
+      statusText: r.statusText,
+      bodyPreview: text.slice(0, 300),
     });
-
-    const text = await r.text();
-    if (!text?.trim()) {
-      console.warn("[BrickArt] Shopify upload: empty response body");
-      throw new Error(`File upload failed: ${r.status} ${r.statusText}`);
-    }
-
-    let json;
-    try {
-      json = JSON.parse(text);
-    } catch (e) {
-      console.error("[BrickArt] Shopify upload: response not JSON", e);
-      throw new Error(`File upload failed: ${r.status} ${r.statusText}`);
-    }
-
-    if (!r.ok) {
-      console.error("[BrickArt] File upload failed", {
-        status: r.status,
-        statusText: r.statusText,
-        bodyPreview: text.slice(0, 300),
-      });
-      throw new Error(`File upload failed: ${r.status} ${r.statusText}`);
-    }
-
-    const url = json?.file?.url || json?.files?.[0]?.url || null;
-    return url;
+    throw new Error(`File upload failed: ${r.status} ${r.statusText}`);
   }
+
+  const json = JSON.parse(text);
+  return json.file?.url || null;
+}
 
   try {
     // --- 7) Parse incoming body ---
