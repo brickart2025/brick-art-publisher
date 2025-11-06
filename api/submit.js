@@ -1,6 +1,6 @@
 // /api/submit.js — Brick Art Publisher (Vercel serverless)
-// Staged uploads → Shopify Files → create Blog Article (published).
-// Stores submitter email in a private article metafield (brick_art.submitter_email).
+// Upload images (staged uploads) → Shopify Files → Create Blog Article.
+// Store submitter email privately as an article metafield (not shown publicly).
 
 export default async function handler(req, res) {
   // --- CORS ---
@@ -24,15 +24,16 @@ export default async function handler(req, res) {
 
   // --- Env ---
   const STORE   = process.env.SHOPIFY_STORE_DOMAIN;     // e.g. brick-art.myshopify.com
-  const TOKEN   = process.env.SHOPIFY_ADMIN_API_TOKEN;  // scopes: write_files, read_files, write_content
+  const TOKEN   = process.env.SHOPIFY_ADMIN_API_TOKEN;  // write_files, read_files, write_content
   const BLOG_ID = process.env.BLOG_ID;                  // numeric blog ID
   if (!STORE || !TOKEN || !BLOG_ID) {
     console.error("[BrickArt] Missing envs", { STORE: !!STORE, TOKEN: !!TOKEN, BLOG_ID: !!BLOG_ID });
     return res.status(500).json({ ok: false, error: "Server not configured" });
   }
 
-  const REST_BASE = `https://${STORE}/admin/api/2024-07`;
-  const GQL_URL   = `https://${STORE}/admin/api/2024-07/graphql.json`;
+  const API_VERSION = "2024-07";
+  const REST_BASE   = `https://${STORE}/admin/api/${API_VERSION}`;
+  const GQL_URL     = `https://${STORE}/admin/api/${API_VERSION}/graphql.json`;
 
   // --- Helpers ---
   const esc = (s = "") => String(s).replace(/[&<>"]/g, m => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[m]));
@@ -61,14 +62,14 @@ export default async function handler(req, res) {
       },
       body: JSON.stringify({ query, variables }),
     });
-    const text = await r.text();
-    let json = {};
-    try { json = text ? JSON.parse(text) : {}; } catch {}
-    if (!r.ok || json.errors) {
-      console.error("[BrickArt] GQL FAILED", r.status, json.errors || text?.slice(0, 300));
-      throw new Error(JSON.stringify({ step: "graphql", status: r.status, errors: json.errors || text }));
+    const t = await r.text();
+    let j = {};
+    try { j = t ? JSON.parse(t) : {}; } catch {}
+    if (!r.ok || j.errors) {
+      console.error("[BrickArt] GQL FAILED", r.status, j.errors || t?.slice(0, 300));
+      throw new Error(JSON.stringify({ step: "graphql", status: r.status, errors: j.errors || t }));
     }
-    return json.data;
+    return j.data;
   }
 
   async function getFileUrlByFilename(filename, tries = 5) {
@@ -113,10 +114,10 @@ export default async function handler(req, res) {
       }
     `;
     const input = [{ resource: "IMAGE", filename, mimeType: "image/png", httpMethod: "POST" }];
-    const data1 = await shopifyGQL(STAGED_UPLOADS_CREATE, { input });
-    const target = data1?.stagedUploadsCreate?.stagedTargets?.[0];
+    const d1 = await shopifyGQL(STAGED_UPLOADS_CREATE, { input });
+    const target = d1?.stagedUploadsCreate?.stagedTargets?.[0];
     if (!target) {
-      throw new Error(JSON.stringify({ step: "stagedUploadsCreate", errors: data1?.stagedUploadsCreate?.userErrors }));
+      throw new Error(JSON.stringify({ step: "stagedUploadsCreate", errors: d1?.stagedUploadsCreate?.userErrors }));
     }
 
     // 2) POST bytes to S3
@@ -125,12 +126,11 @@ export default async function handler(req, res) {
     const form = new FormData();
     for (const p of target.parameters) form.append(p.name, p.value);
     form.append("file", fileBlob, filename);
-
-    const s3Resp = await fetch(target.url, { method: "POST", body: form });
-    if (!s3Resp.ok) {
-      const t = await s3Resp.text().catch(() => "");
-      console.error("[BrickArt] S3 upload FAILED", s3Resp.status, t?.slice(0,300));
-      throw new Error(JSON.stringify({ step: "s3Upload", status: s3Resp.status, error: t }));
+    const s3 = await fetch(target.url, { method: "POST", body: form });
+    if (!s3.ok) {
+      const tt = await s3.text().catch(() => "");
+      console.error("[BrickArt] S3 upload FAILED", s3.status, tt?.slice(0,300));
+      throw new Error(JSON.stringify({ step: "s3Upload", status: s3.status, error: tt }));
     }
 
     // 3) fileCreate
@@ -146,12 +146,12 @@ export default async function handler(req, res) {
         }
       }
     `;
-    const data2 = await shopifyGQL(FILE_CREATE, {
+    const d2 = await shopifyGQL(FILE_CREATE, {
       files: [{ contentType: "IMAGE", originalSource: target.resourceUrl, alt: altText || "Brick Art submission" }]
     });
 
     let url = null;
-    const created = data2?.fileCreate?.files?.[0] || null;
+    const created = d2?.fileCreate?.files?.[0] || null;
     if (created) {
       if (created.__typename === "MediaImage") url = created.image?.url || null;
       else if (created.__typename === "GenericFile") url = created.url || null;
@@ -161,8 +161,8 @@ export default async function handler(req, res) {
       url = await getFileUrlByFilename(filename);
     }
     if (!url) {
-      console.error("[BrickArt] fileCreate userErrors:", data2?.fileCreate?.userErrors);
-      throw new Error(JSON.stringify({ step: "fileCreate", errors: data2?.fileCreate?.userErrors || "no url after create" }));
+      console.error("[BrickArt] fileCreate userErrors:", d2?.fileCreate?.userErrors);
+      throw new Error(JSON.stringify({ step: "fileCreate", errors: d2?.fileCreate?.userErrors || "no url after create" }));
     }
 
     console.log("[BrickArt] File ready:", url);
@@ -182,7 +182,7 @@ export default async function handler(req, res) {
       timestamp,
       imageClean_b64,
       imageLogo_b64,
-      userEmail, // from frontend; stored privately
+      userEmail, // ← from frontend; stored privately
     } = body;
 
     if (!timestamp || (!imageClean_b64 && !imageLogo_b64)) {
@@ -196,7 +196,7 @@ export default async function handler(req, res) {
       hasEmail: !!userEmail
     });
 
-    // --- Upload images in parallel ---
+    // --- Upload images (parallel) ---
     const safe =
       `${String(timestamp).replace(/[:.Z\-]/g,"")}-${String(nickname||"anon").toLowerCase().replace(/[^a-z0-9]+/g,"-")}`.replace(/-+/g,"-");
 
@@ -205,7 +205,7 @@ export default async function handler(req, res) {
       uploadImageB64ToFiles(imageLogo_b64,  `${safe}-logo.png`,  "Brick Art design (watermarked)"),
     ]);
 
-    // --- Build article body (no public email) ---
+    // --- Article body (no public email) ---
     const meta = [
       grid ? `Grid: ${grid}` : "",
       baseplate ? `Baseplate: ${baseplate}` : "",
@@ -219,7 +219,7 @@ export default async function handler(req, res) {
       ${logoUrl  ? `<p><img src="${logoUrl}"  alt="Brick Art design (watermarked)"/></p>` : ""}
     `.trim();
 
-    // --- Create blog article (publish now); set featured image for cards ---
+    // --- Create article (publish now; set featured card image) ---
     const articlePayload = {
       article: {
         title: `Brick Art submission — ${nickname || "Anonymous"} (${new Date(timestamp).toLocaleString()})`,
@@ -245,7 +245,7 @@ export default async function handler(req, res) {
 
     const articleId = articleJson?.article?.id;
 
-    // --- Store submitter email privately as metafield (not public) ---
+    // --- Store submitter email privately as metafield ---
     if (userEmail && articleId) {
       await shopifyREST(`/articles/${articleId}/metafields.json`, {
         method: "POST",
