@@ -1,5 +1,6 @@
 // /api/submit.js — Brick Art Publisher (Vercel serverless)
-// Upload to Shopify Files, then create a Blog Article (Admin REST 2024-07)
+// Uses Shopify GraphQL staged uploads (stagedUploadsCreate + fileCreate)
+// Then creates a Blog Article with the uploaded image URLs.
 
 export default async function handler(req, res) {
   // --- 1) CORS (preflight + simple) ---
@@ -22,70 +23,135 @@ export default async function handler(req, res) {
 
   // --- 3) Env vars ---
   const STORE   = process.env.SHOPIFY_STORE_DOMAIN;     // e.g. brick-art.myshopify.com
-  const TOKEN   = process.env.SHOPIFY_ADMIN_API_TOKEN;  // needs write_files, write_content
-  const BLOG_ID = process.env.BLOG_ID;                  // numeric id
+  const TOKEN   = process.env.SHOPIFY_ADMIN_API_TOKEN;  // needs: write_files, write_content
+  const BLOG_ID = process.env.BLOG_ID;                  // numeric
   if (!STORE || !TOKEN || !BLOG_ID) {
     console.error("[BrickArt] Missing envs", { STORE: !!STORE, TOKEN: !!TOKEN, BLOG_ID: !!BLOG_ID });
     return res.status(500).json({ ok: false, error: "Server not configured" });
   }
 
-  const API_BASE = `https://${STORE}/admin/api/2024-07`;
+  const REST_BASE = `https://${STORE}/admin/api/2024-07`;
+  const GQL_URL   = `https://${STORE}/admin/api/2024-07/graphql.json`;
 
   // --- 4) Helpers ---
   const esc = (s = "") =>
     String(s).replace(/[&<>"]/g, (m) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[m]));
-
   const toRawBase64 = (src = "") =>
     src.replace(/^data:image\/[a-zA-Z0-9.+-]+;base64,/, "").trim();
 
-  async function shopifyFetch(path, init = {}) {
-    const url = `${API_BASE}${path.startsWith("/") ? "" : "/"}${path}`;
+  async function shopifyREST(path, init = {}) {
+    const url = `${REST_BASE}${path.startsWith("/") ? "" : "/"}${path}`;
     const headers = {
       "X-Shopify-Access-Token": TOKEN,
       "Accept": "application/json",
       "Content-Type": "application/json",
       ...(init.headers || {}),
     };
-    console.log("[BrickArt] Shopify →", url);
+    console.log("[BrickArt] Shopify REST →", url);
     return fetch(url, { ...init, headers });
   }
 
-  // --- 5) Upload file (REST 'attachment' payload) ---
-  async function uploadFile(base64, filename) {
+  async function shopifyGQL(query, variables = {}) {
+    const r = await fetch(GQL_URL, {
+      method: "POST",
+      headers: {
+        "X-Shopify-Access-Token": TOKEN,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+      },
+      body: JSON.stringify({ query, variables }),
+    });
+    const text = await r.text();
+    let json = {};
+    try { json = text ? JSON.parse(text) : {}; } catch {}
+    if (!r.ok || json.errors) {
+      console.error("[BrickArt] GQL FAILED", r.status, json.errors || text?.slice(0, 300));
+      throw new Error(JSON.stringify({ step: "graphql", status: r.status, errors: json.errors || text }));
+    }
+    return json.data;
+  }
+
+  // --- 5) Upload one PNG via staged uploads → returns CDN URL
+  async function uploadImageB64ToFiles(base64, filename, altText) {
     if (!base64) return null;
     const raw = toRawBase64(base64);
     if (!raw) return null;
 
-    const body = {
-      file: {
-        attachment: raw,          // ✅ this variant matches your store
-        filename,
-        mime_type: "image/png",   // harmless; remove if Shopify ever complains
-        alt: "Brick Art submission"
+    // 5a) Ask Shopify for a staged S3 upload
+    const STAGED_UPLOADS_CREATE = `
+      mutation stagedUploadsCreate($input: [StagedUploadInput!]!) {
+        stagedUploadsCreate(input: $input) {
+          stagedTargets {
+            url
+            resourceUrl
+            parameters { name value }
+          }
+          userErrors { field message }
+        }
       }
-    };
-
-    const r = await shopifyFetch("/files.json", {
-      method: "POST",
-      body: JSON.stringify(body),
-    });
-
-    const text = await r.text();
-    let json = {};
-    try { json = text ? JSON.parse(text) : {}; } catch {}
-
-    if (!r.ok) {
-      console.error("[BrickArt] File upload FAILED", r.status, json?.errors || text?.slice(0,300));
-      throw new Error(JSON.stringify({ step: "files.create", status: r.status, errors: json?.errors || text }));
+    `;
+    const input = [{
+      resource: "FILE",
+      filename,
+      mimeType: "image/png",
+      httpMethod: "POST"
+    }];
+    const data1 = await shopifyGQL(STAGED_UPLOADS_CREATE, { input });
+    const target = data1?.stagedUploadsCreate?.stagedTargets?.[0];
+    if (!target) {
+      throw new Error(JSON.stringify({ step: "stagedUploadsCreate", errors: data1?.stagedUploadsCreate?.userErrors }));
     }
 
-    const url = json?.file?.url || json?.files?.[0]?.url || null;
-    console.log("[BrickArt] File stored:", url);
+    // 5b) POST the actual bytes to S3 using FormData
+    const bytes = Buffer.from(raw, "base64");
+    const fileBlob = new Blob([bytes], { type: "image/png" });
+
+    const form = new FormData();
+    for (const p of target.parameters) form.append(p.name, p.value);
+    form.append("file", fileBlob, filename);
+
+    const s3Resp = await fetch(target.url, { method: "POST", body: form });
+    if (!s3Resp.ok) {
+      const t = await s3Resp.text().catch(() => "");
+      console.error("[BrickArt] S3 upload FAILED", s3Resp.status, t?.slice(0,300));
+      throw new Error(JSON.stringify({ step: "s3Upload", status: s3Resp.status, error: t }));
+    }
+
+    // 5c) Tell Shopify to create a File from the staged upload
+    const FILE_CREATE = `
+      mutation fileCreate($files: [FileCreateInput!]!) {
+        fileCreate(files: $files) {
+          files {
+            __typename
+            ... on MediaImage {
+              id
+              alt
+              image { url }
+            }
+          }
+          userErrors { field message }
+        }
+      }
+    `;
+    const data2 = await shopifyGQL(FILE_CREATE, {
+      files: [{
+        contentType: "IMAGE",
+        originalSource: target.resourceUrl,
+        alt: altText || "Brick Art submission"
+      }]
+    });
+    const created = data2?.fileCreate?.files?.[0];
+    if (!created || !created.image?.url) {
+      throw new Error(JSON.stringify({ step: "fileCreate", errors: data2?.fileCreate?.userErrors }));
+    }
+
+    const url = created.image.url;
+    console.log("[BrickArt] File created:", url);
     return url;
   }
 
   try {
-    // --- 6) Parse body (also handle string bodies) ---
+    // --- 6) Parse body (string or JSON) ---
     const body = typeof req.body === "string" ? JSON.parse(req.body) : (req.body || {});
     const {
       nickname,
@@ -104,14 +170,14 @@ export default async function handler(req, res) {
 
     console.log("[BrickArt] Submission received:", { nickname, category, grid, baseplate, totalBricks, timestamp });
 
-    // --- 7) Upload images (prefer both if provided) ---
+    // --- 7) Upload images via staged uploads
     const safeNameBase =
       `${String(timestamp).replace(/[:.Z\-]/g,"")}-${String(nickname||"anon").toLowerCase().replace(/[^a-z0-9]+/g,"-")}`.replace(/-+/g,"-");
 
-    const cleanUrl = await uploadFile(imageClean_b64, `${safeNameBase}-clean.png`);
-    const logoUrl  = await uploadFile(imageLogo_b64,  `${safeNameBase}-logo.png`);
+    const cleanUrl = await uploadImageB64ToFiles(imageClean_b64, `${safeNameBase}-clean.png`, "Brick Art design (clean)");
+    const logoUrl  = await uploadImageB64ToFiles(imageLogo_b64,  `${safeNameBase}-logo.png`,  "Brick Art design (watermarked)");
 
-    // --- 8) Build article HTML ---
+    // --- 8) Build blog HTML
     const meta = [
       grid ? `Grid: ${grid}` : "",
       baseplate ? `Baseplate: ${baseplate}` : "",
@@ -126,7 +192,7 @@ export default async function handler(req, res) {
       ${logoUrl  ? `<p><img src="${logoUrl}" alt="Brick Art design (watermarked)"/></p>` : ""}
     `.trim();
 
-    // --- 9) Create blog article ---
+    // --- 9) Create blog article (REST)
     const articlePayload = {
       article: {
         title: `Brick Art submission — ${nickname || "Anonymous"} (${new Date(timestamp).toLocaleString()})`,
@@ -135,7 +201,7 @@ export default async function handler(req, res) {
       },
     };
 
-    const r = await shopifyFetch(`/blogs/${BLOG_ID}/articles.json`, {
+    const r = await shopifyREST(`/blogs/${BLOG_ID}/articles.json`, {
       method: "POST",
       body: JSON.stringify(articlePayload),
     });
