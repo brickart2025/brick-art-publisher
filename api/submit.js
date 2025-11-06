@@ -182,7 +182,7 @@ export default async function handler(req, res) {
       timestamp,
       imageClean_b64,
       imageLogo_b64,
-      userEmail, // ← from frontend; stored privately
+      submitterEmail, // ← from frontend; stored privately
     } = body;
 
     if (!timestamp || (!imageClean_b64 && !imageLogo_b64)) {
@@ -244,21 +244,66 @@ export default async function handler(req, res) {
     }
 
     const articleId = articleJson?.article?.id;
+    // --- Save submitter email privately as a metafield ---
+try {
+  const articleId = aj?.article?.id;
 
-    // --- Store submitter email privately as metafield ---
-    if (userEmail && articleId) {
-      await shopifyREST(`/articles/${articleId}/metafields.json`, {
-        method: "POST",
-        body: JSON.stringify({
-          metafield: {
-            namespace: "brick_art",
-            key: "submitter_email",
-            type: "single_line_text_field",
-            value: userEmail,
-          },
-        }),
-      });
+  if (articleId && userEmail) {
+    const mfBody = {
+      metafield: {
+        namespace: "brickart",
+        key: "submitter_email",
+        type: "single_line_text_field",
+        value: String(userEmail),
+        owner_resource: "article",
+        owner_id: articleId
+      }
+    };
+
+    const mfRes = await shopifyFetch("/metafields.json", {
+      method: "POST",
+      body: JSON.stringify(mfBody)
+    });
+
+    const mfText = await mfRes.text();
+    if (!mfRes.ok) {
+      console.warn("[BrickArt] metafield save failed", mfRes.status, mfRes.statusText, mfText?.slice(0,300));
+    } else {
+      console.log("[BrickArt] metafield saved for article", articleId);
     }
+  }
+} catch (mfErr) {
+  console.error("[BrickArt] metafield creation error", mfErr);
+}
+
+  // --- Store submitter email privately as a metafield on the article ---
+try {
+  if (articleId && submitterEmail) {   // or: (articleId && userEmail)
+    const mfBody = {
+      metafield: {
+        namespace: "brickart",
+        key: "submitter_email",
+        type: "single_line_text_field",
+        value: String(submitterEmail), // or: String(userEmail)
+      },
+    };
+
+    const mfRes = await shopifyREST(`/articles/${articleId}/metafields.json`, {
+      method: "POST",
+      body: JSON.stringify(mfBody),
+    });
+
+    const mfText = await mfRes.text();
+    if (!mfRes.ok) {
+      console.warn("[BrickArt] metafield save failed",
+        mfRes.status, mfRes.statusText, mfText?.slice(0,300));
+    } else {
+      console.log("[BrickArt] metafield saved for article", articleId);
+    }
+  }
+} catch (mfErr) {
+  console.error("[BrickArt] metafield creation error", mfErr);
+}  
 
     const handle = articleJson?.article?.handle;
     const blogHandle = articleJson?.article?.blog?.handle;
