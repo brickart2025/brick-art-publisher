@@ -49,65 +49,65 @@ export default async function handler(req, res) {
     return r;
   }
 
-  // Upload base64 to Files using multipart/form-data (most compatible with Shopify)
-  async function uploadToFiles(b64MaybePrefixed, filename) {
-    if (!b64MaybePrefixed) return null;
+  // Upload base64 to Shopify Files using JSON (file.attachment)
+async function uploadToFiles(b64MaybePrefixed, filename) {
+  if (!b64MaybePrefixed) return null;
 
-    // strip any data URL prefix + whitespace
-    const base64 = String(b64MaybePrefixed)
-      .replace(/^data:image\/[a-zA-Z0-9.+-]+;base64,/, "")
-      .replace(/\s+/g, "");
+  // strip any data URL prefix and whitespace
+  const base64 = String(b64MaybePrefixed)
+    .replace(/^data:image\/[a-zA-Z0-9.+-]+;base64,/, "")
+    .replace(/\s+/g, "");
 
-    if (base64.length < 80) {
-      console.warn("[BrickArt] base64 too short:", filename, base64.length);
-      return null;
-    }
-
-    const form = new FormData();
-    form.append("file[attachment]", base64);
-    form.append("file[filename]", filename);
-
-    // NOTE: DO NOT set Content-Type here — fetch will set proper multipart boundary.
-    const r = await shopifyREST("/files.json", {
-      method: "POST",
-      body: form,
-    });
-
-    const txt = await r.text();
-    console.log("[BrickArt] /files.json (multipart) ->", { status: r.status, ok: r.ok, preview: (txt || "").slice(0, 140) });
-
-    let json = null;
-    try { json = txt ? JSON.parse(txt) : null; } catch {}
-
-    // Sometimes Shopify acknowledges but the url is missing in this immediate response.
-    let url = json?.file?.url || (Array.isArray(json?.files) ? json.files[0]?.url : null) || null;
-    if (url) return url;
-
-    if (!r.ok) {
-      throw new Error(`File upload failed: ${r.status} ${r.statusText}`);
-    }
-
-    // Fallback: poll by filename until url appears
-    const started = Date.now();
-    const timeoutMs = 15000;
-    while (!url && Date.now() - started < timeoutMs) {
-      await new Promise((s) => setTimeout(s, 1000));
-      const q = `/files.json?limit=25&fields=filename,url,created_at,updated_at`;
-      const pr = await shopifyREST(q, { method: "GET" });
-      const pt = await pr.text();
-      let pj = null;
-      try { pj = pt ? JSON.parse(pt) : null; } catch {}
-      const hit = (pj?.files || []).find((f) => f?.filename === filename || f?.url?.includes(filename));
-      if (hit?.url) {
-        url = hit.url;
-        break;
-      }
-    }
-
-    if (!url) throw new Error("File appeared to upload but no URL was returned.");
-    console.log("[BrickArt] File ready:", url);
-    return url;
+  if (base64.length < 80) {
+    console.warn("[BrickArt] base64 too short:", filename, base64.length);
+    return null;
   }
+
+  // JSON body with file.attachment + filename
+  const body = {
+    file: {
+      attachment: base64,      // ✅ NOT "content"
+      filename,                // ✅ keep this
+      // DO NOT send file_type or mime_type — they cause 406 on some stores
+    },
+  };
+
+  const r = await shopifyREST("/files.json", {
+    method: "POST",
+    body: JSON.stringify(body),       // headers (Accept + Content-Type) are set in shopifyREST
+  });
+
+  const txt = await r.text();
+  console.log("[BrickArt] /files.json (JSON) ->", { status: r.status, ok: r.ok, preview: (txt || "").slice(0, 140) });
+
+  let json = null;
+  try { json = txt ? JSON.parse(txt) : null; } catch {}
+
+  // Try to read the URL directly
+  let url = json?.file?.url || (Array.isArray(json?.files) ? json.files[0]?.url : null) || null;
+  if (url) return url;
+
+  if (!r.ok) {
+    throw new Error(`File upload failed: ${r.status} ${r.statusText}`);
+  }
+
+  // Fallback: poll by filename for up to ~15s
+  const started = Date.now();
+  const timeoutMs = 15000;
+  while (!url && Date.now() - started < timeoutMs) {
+    await new Promise((s) => setTimeout(s, 1000));
+    const pr = await shopifyREST("/files.json?limit=25&fields=filename,url,created_at,updated_at", { method: "GET" });
+    const pt = await pr.text();
+    let pj = null;
+    try { pj = pt ? JSON.parse(pt) : null; } catch {}
+    const hit = (pj?.files || []).find(f => f?.filename === filename || f?.url?.includes(filename));
+    if (hit?.url) { url = hit.url; break; }
+  }
+
+  if (!url) throw new Error("File appeared to upload but no URL was returned.");
+  console.log("[BrickArt] File ready:", url);
+  return url;
+}
 
   try {
     // --- 4) Parse body safely ---
