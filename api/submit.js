@@ -1,51 +1,40 @@
-// /api/submit.js — Brick Art Publisher (Vercel serverless)
-// Uses Shopify Admin REST 2024-07
-// - Upload images to Files via file.content (base64)
-// - Create blog article with the uploaded image URLs
-// - Save submitter email privately as an article metafield
+// api/submit.js
+// Brick Art Publisher — rollback version that reliably uploads images to Shopify
+// ENV required: SHOPIFY_STORE_DOMAIN, SHOPIFY_ADMIN_API_TOKEN, BLOG_ID
 
 export default async function handler(req, res) {
-  // ----- 1) CORS (allow your storefront + localhost) -----
-  const ALLOW_ORIGINS = new Set([
+  // --- CORS (allow from your storefront + preflight) ---
+  const ALLOW = new Set([
     "https://www.brick-art.com",
     "https://brick-art.com",
     "http://localhost:3000",
   ]);
-  const origin = req.headers.origin;
-  if (origin && ALLOW_ORIGINS.has(origin)) {
-    res.setHeader("Access-Control-Allow-Origin", origin);
-  }
+  const origin = req.headers.origin || "";
+  if (ALLOW.has(origin)) res.setHeader("Access-Control-Allow-Origin", origin);
   res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   res.setHeader("Access-Control-Max-Age", "86400");
   if (req.method === "OPTIONS") return res.status(200).end();
 
-  // ----- 2) POST only -----
   if (req.method !== "POST") {
     return res.status(405).json({ ok: false, error: "Method Not Allowed" });
   }
 
-  // ----- 3) Env -----
-  const required = (k) => {
+  // --- Env & base ---
+  const requireEnv = (k) => {
     const v = process.env[k];
-    if (!v) throw new Error(`Missing environment variable: ${k}`);
+    if (!v) throw new Error(`Missing env: ${k}`);
     return v;
   };
-  const STORE = required("SHOPIFY_STORE_DOMAIN");        // e.g. ek4iwc-kq.myshopify.com
-  const TOKEN = required("SHOPIFY_ADMIN_API_TOKEN");     // Admin API access token
-  const BLOG_ID = required("BLOG_ID");                   // numeric blog id
-
+  const STORE = requireEnv("SHOPIFY_STORE_DOMAIN");
+  const TOKEN = requireEnv("SHOPIFY_ADMIN_API_TOKEN");
+  const BLOG_ID = requireEnv("BLOG_ID");
   const API_VERSION = "2024-07";
   const BASE = `https://${STORE}/admin/api/${API_VERSION}`;
 
-  // ----- 4) Helpers -----
-  function esc(s = "") {
-    return String(s).replace(/[&<>"]/g, (m) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[m]));
-  }
-  const toRawBase64 = (src = "") => src.replace(/^data:image\/\w+;base64,/, "").trim();
-
-  async function shopifyFetch(path, init = {}) {
+  // --- Shopify fetch helper ---
+  async function shopify(path, init = {}) {
     const url = `${BASE}${path.startsWith("/") ? path : `/${path}`}`;
     const headers = {
       "X-Shopify-Access-Token": TOKEN,
@@ -53,68 +42,73 @@ export default async function handler(req, res) {
       "Accept": "application/json",
       ...(init.headers || {}),
     };
-    console.log("[BrickArt] →", url);
     return fetch(url, { ...init, headers });
   }
 
-  // --- Upload a base64 PNG to Shopify Files; return the CDN URL ---
-async function uploadFile(b64WithOrWithoutPrefix, filename) {
-  if (!b64WithOrWithoutPrefix) return null;
+  // --- Sleep helper for polling ---
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-  // Strip any data URL prefix
-  const raw = String(b64WithOrWithoutPrefix).replace(/^data:image\/\w+;base64,/, "");
+  // --- Upload base64 -> Shopify Files (REST /files.json with attachment) ---
+  async function uploadFile(b64MaybeWithPrefix, filename) {
+    if (!b64MaybeWithPrefix) return null;
 
-  const body = {
-    file: {
-      // IMPORTANT: Shopify REST expects `attachment` here for base64.
-      // Do NOT include file_type, mime_type, alt, etc. (those can trigger 406)
-      attachment: raw,
-      filename
+    const raw = String(b64MaybeWithPrefix).replace(/^data:image\/\w+;base64,/, "");
+
+    // Minimal, known-good payload: only attachment + filename
+    const r = await shopify("/files.json", {
+      method: "POST",
+      body: JSON.stringify({
+        file: {
+          attachment: raw,
+          filename,
+        },
+      }),
+    });
+
+    const text = await r.text();
+    let json = null;
+    try { json = text ? JSON.parse(text) : null; } catch (_) {}
+
+    console.log("[BrickArt] POST /files.json", { status: r.status, ok: r.ok, bodyPreview: (text || "").slice(0, 160) });
+
+    // If the API already returns a URL, use it immediately.
+    let url =
+      (json && json.file && json.file.url) ||
+      (json && Array.isArray(json.files) && json.files[0] && json.files[0].url) ||
+      null;
+
+    // If no URL yet, poll the recent files list a few times and match by filename.
+    if (!url) {
+      for (let i = 0; i < 10 && !url; i++) {
+        await sleep(700);
+        const gr = await shopify("/files.json?limit=25&fields=id,created_at,updated_at,filename,url");
+        const gt = await gr.text();
+        let gj = null;
+        try { gj = gt ? JSON.parse(gt) : null; } catch (_) {}
+
+        const list = (gj && (gj.files || gj.file || [])) || [];
+        const match = list.find((f) => {
+          const fName = f.filename || f.file_name || "";
+          const fUrl  = f.url || "";
+          return (fName && fName.includes(filename)) || (fUrl && fUrl.includes(filename));
+        });
+        if (match && match.url) url = match.url;
+
+        if (!url) console.log("[BrickArt] poll files (try", i + 1, ") — no url yet");
+      }
     }
-  };
 
-  const r = await shopifyFetch("/files.json", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Accept": "application/json"
-    },
-    body: JSON.stringify(body),
-  });
+    if (!r.ok && !url) {
+      throw new Error(`File upload failed: ${r.status} ${r.statusText} :: ${text || "<empty>"}`);
+    }
+    if (!url) throw new Error("File upload succeeded but no URL was found after polling.");
 
-  const text = await r.text();
-  let json = null;
-  try { json = text ? JSON.parse(text) : null; } catch (_) {}
-
-  // Log a compact diagnostic line either way
-  console.log("[BrickArt] /files.json response", {
-    status: r.status,
-    ok: r.ok,
-    // show first 160 chars only to avoid log bloat
-    bodyPreview: (text || "").slice(0, 160)
-  });
-
-  if (!r.ok) {
-    // Surface the raw body so we can see Shopify’s reason
-    throw new Error(`File upload failed: ${r.status} ${r.statusText} :: ${text || "<empty>"}`);
+    return url;
   }
-
-  // Accept both shapes Shopify may return
-  const url =
-    (json && json.file && json.file.url) ||
-    (json && Array.isArray(json.files) && json.files[0] && json.files[0].url) ||
-    null;
-
-  if (!url) {
-    throw new Error("File upload succeeded but no URL returned.");
-  }
-  return url;
-}
 
   try {
-    // ----- 5) Parse body -----
-    // Body may arrive as string if a proxy rewrites it; normalize to object.
-    const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {});
+    // --- Parse body (stringified or object) ---
+    const body = typeof req.body === "string" ? JSON.parse(req.body) : (req.body || {});
     const {
       nickname,
       category,
@@ -125,112 +119,98 @@ async function uploadFile(b64WithOrWithoutPrefix, filename) {
       timestamp,
       imageClean_b64,
       imageLogo_b64,
-      // frontend sends this as 'submitterEmail'
-      submitterEmail,
+      submitterEmail, // optional, stored privately; never shown publicly
     } = body;
 
     if (!timestamp || (!imageClean_b64 && !imageLogo_b64)) {
-      return res.status(400).json({
-        ok: false,
-        error: "Missing required fields (timestamp and at least one image)",
-      });
+      return res.status(400).json({ ok: false, error: "Missing required fields (timestamp and at least one image)" });
     }
 
     console.log("[BrickArt] Submission received:", {
-      nickname,
-      category,
-      grid,
-      baseplate,
-      totalBricks,
-      timestamp,
-      cleanLen: imageClean_b64?.length || 0,
-      logoLen: imageLogo_b64?.length || 0,
+      nickname, category, grid, baseplate, totalBricks, timestamp,
+      cleanLen: imageClean_b64 ? imageClean_b64.length : 0,
+      logoLen:  imageLogo_b64  ? imageLogo_b64.length  : 0,
       hasEmail: !!submitterEmail,
     });
 
-    // ----- 6) Upload images -----
-    const safeBase = `${String(timestamp).replace(/[:.Z\-]/g, "")}-${String(nickname || "student")
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")}`;
-
+    // --- Upload images (in parallel) ---
+    const safe = `${String(timestamp).replace(/[^\dA-Za-z]/g, "")}-${String(nickname || "student").toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
     const [cleanUrl, logoUrl] = await Promise.all([
-      uploadFile(imageClean_b64, `${safeBase}-clean.png`),
-      uploadFile(imageLogo_b64,  `${safeBase}-logo.png`),
+      uploadFile(imageClean_b64, `${safe}-clean.png`).catch((e) => { console.error("clean upload err", e); return null; }),
+      uploadFile(imageLogo_b64,  `${safe}-logo.png`).catch((e)  => { console.error("logo upload err",  e); return null; }),
     ]);
 
-    // ----- 7) Create article -----
+    // --- Build article ---
     const niceTime = new Date(timestamp).toLocaleString("en-US", {
-      hour12: true, year: "numeric", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit",
+      hour12: true, year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit",
     });
+    const title = `Brick Art submission — ${nickname || "Brick artist"} (${niceTime})`;
 
-    const title = `Brick Art submission — ${nickname || "Student"} (${niceTime})`;
-    const metaBits = [
+    const esc = (s = "") => String(s).replace(/[&<>"]/g, (m) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[m]));
+    const meta = [
       grid ? `Grid: ${grid}` : null,
       baseplate ? `Baseplate: ${baseplate}` : null,
       Number.isFinite(totalBricks) ? `Total Bricks: ${totalBricks}` : null,
     ].filter(Boolean).join(" · ");
 
     const body_html = `
-      <p><strong>Nickname:</strong> ${esc(nickname || "Student")}</p>
-      ${metaBits ? `<p>${esc(metaBits)}</p>` : ""}
+      <p><strong>Nickname:</strong> ${esc(nickname || "Brick artist")}</p>
+      ${meta ? `<p>${esc(meta)}</p>` : ""}
       ${cleanUrl ? `<p><img src="${cleanUrl}" alt="Design (clean)" /></p>` : ""}
       ${logoUrl  ? `<p><img src="${logoUrl}"  alt="Design (logo)"  /></p>` : ""}
-    `.trim();
+    `;
 
-    const articlePayload = {
-      article: {
-        title,
-        body_html,
-        tags: category ? String(category) : undefined,
-      },
-    };
-
-    const ar = await shopifyFetch(`/blogs/${BLOG_ID}/articles.json`, {
+    const ar = await shopify(`/blogs/${BLOG_ID}/articles.json`, {
       method: "POST",
-      body: JSON.stringify(articlePayload),
+      body: JSON.stringify({
+        article: {
+          title,
+          body_html,
+          tags: category ? String(category) : undefined,
+        },
+      }),
     });
 
     const articleText = await ar.text();
-    let articleJson = {};
-    try { articleJson = articleText ? JSON.parse(articleText) : {}; } catch {}
+    let aj = null;
+    try { aj = articleText ? JSON.parse(articleText) : null; } catch (_) {}
     if (!ar.ok) {
-      console.error("[BrickArt] Blog create FAILED", ar.status, ar.statusText, articleText?.slice(0, 300));
-      return res.status(500).json({ ok: false, error: "Failed to create blog post" });
+      console.error("[BrickArt] blog create failed", ar.status, ar.statusText, (articleText || "").slice(0, 160));
+      return res.status(500).json({ ok: false, error: "Create article failed" });
     }
 
-    const articleId = articleJson?.article?.id;
+    const articleId = aj?.article?.id;
 
-    // ----- 8) Save submitter email privately as a metafield on the article -----
-    try {
-      if (articleId && submitterEmail) {
-        const mfBody = {
-          metafield: {
-            namespace: "brickart",
-            key: "submitter_email",
-            type: "single_line_text_field",
-            value: String(submitterEmail),
-          },
-        };
-        const mfRes = await shopifyFetch(`/articles/${articleId}/metafields.json`, {
+    // --- Store submitter email privately (non-blocking) ---
+    if (articleId && submitterEmail) {
+      try {
+        const mfRes = await shopify(`/articles/${articleId}/metafields.json`, {
           method: "POST",
-          body: JSON.stringify(mfBody),
+          body: JSON.stringify({
+            metafield: {
+              namespace: "brickart",
+              key: "submitter_email",
+              type: "single_line_text_field",
+              value: String(submitterEmail),
+            },
+          }),
         });
-        if (!mfRes.ok) {
-          const mfTxt = await mfRes.text();
-          console.error("[BrickArt] metafield create error", mfRes.status, mfRes.statusText, mfTxt?.slice(0, 300));
-        } else {
-          console.log("[BrickArt] metafield saved for article", articleId);
-        }
+        const mfTxt = await mfRes.text();
+        console.log("[BrickArt] metafield result", { status: mfRes.status, ok: mfRes.ok, bodyPreview: (mfTxt || "").slice(0, 160) });
+      } catch (mfe) {
+        console.warn("[BrickArt] metafield save skipped/failed", mfe);
       }
-    } catch (mfe) {
-      console.error("[BrickArt] metafield creation error", mfe);
     }
 
-    // ----- 9) Done -----
+    // --- Success ---
+    const handle = aj?.article?.handle;
+    const blogHandle = aj?.article?.blog?.handle;
+    const storefrontUrl = (handle && blogHandle) ? `https://${STORE}/blogs/${blogHandle}/${handle}` : null;
+
     return res.status(200).json({
       ok: true,
       articleId,
+      articleUrl: storefrontUrl,
       files: { cleanUrl, logoUrl },
     });
   } catch (err) {
@@ -238,7 +218,7 @@ async function uploadFile(b64WithOrWithoutPrefix, filename) {
     return res.status(500).json({
       ok: false,
       error: "Server error",
-      detail: String(err?.message || err),
+      detail: String(err && err.message ? err.message : err),
     });
   }
 }
