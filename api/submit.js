@@ -56,7 +56,7 @@ export default async function handler(req, res) {
 
     const body = {
       file: {
-        attachment: raw,          // ✅ correct field for REST /files.json
+        content: raw,          // ✅ correct field for REST /files.json
         filename,
         mime_type: "image/png",
         alt: "Brick Art submission",
