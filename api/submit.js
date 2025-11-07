@@ -6,8 +6,8 @@ export default async function handler(req, res) {
   const ORIGINS = new Set([
     "https://www.brick-art.com",
     "https://brick-art.com",
-    "https://brick-art.myshopify.com",
-    "http://localhost:3000",
+    "https://brick-art.myshopify.com", // theme preview (optional)
+    "http://localhost:3000",           // local dev (optional)
   ]);
   const origin = req.headers.origin;
   if (origin && ORIGINS.has(origin)) res.setHeader("Access-Control-Allow-Origin", origin);
@@ -24,7 +24,7 @@ export default async function handler(req, res) {
 
   // --- 3) Env vars ---
   const STORE   = process.env.SHOPIFY_STORE_DOMAIN;     // e.g. brick-art.myshopify.com
-  const TOKEN   = process.env.SHOPIFY_ADMIN_API_TOKEN;  // scopes: write_files, read_files, write_content
+  const TOKEN   = process.env.SHOPIFY_ADMIN_API_TOKEN;  // needs: write_files, read_files, write_content
   const BLOG_ID = process.env.BLOG_ID;                  // numeric blog ID
   if (!STORE || !TOKEN || !BLOG_ID) {
     console.error("[BrickArt] Missing envs", { STORE: !!STORE, TOKEN: !!TOKEN, BLOG_ID: !!BLOG_ID });
@@ -35,7 +35,7 @@ export default async function handler(req, res) {
   const GQL_URL   = `https://${STORE}/admin/api/2024-07/graphql.json`;
 
   // --- 4) Helpers ---
-  const esc = (s = "") => String(s).replace(/[&<>"]/g, m => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[m]));
+  const esc = (s = "") => String(s).replace(/[&<>"]/g, m => ({ "&":"&amp;","<":"&lt;","<":"&lt;",">":"&gt;",'"':"&quot;" }[m]));
   const toRawBase64 = (src = "") => src.replace(/^data:image\/[a-zA-Z0-9.+-]+;base64,/, "").trim();
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
@@ -71,6 +71,7 @@ export default async function handler(req, res) {
     return json.data;
   }
 
+  // Lookup a file URL by filename (GraphQL search), to handle delayed indexing.
   async function getFileUrlByFilename(filename, tries = 5) {
     const QUERY = `
       query files($q: String!) {
@@ -98,21 +99,31 @@ export default async function handler(req, res) {
     return null;
   }
 
+  // Staged upload → S3 → fileCreate. Returns the CDN URL (polls if needed).
   async function uploadImageB64ToFiles(base64, filename, altText) {
     if (!base64) return null;
     const raw = toRawBase64(base64);
     if (!raw) return null;
 
-    // 1) stagedUploadsCreate
+    // 1) stagedUploadsCreate (IMAGE)
     const STAGED_UPLOADS_CREATE = `
       mutation stagedUploadsCreate($input: [StagedUploadInput!]!) {
         stagedUploadsCreate(input: $input) {
-          stagedTargets { url resourceUrl parameters { name value } }
+          stagedTargets {
+            url
+            resourceUrl
+            parameters { name value }
+          }
           userErrors { field message }
         }
       }
     `;
-    const input = [{ resource: "IMAGE", filename, mimeType: "image/png", httpMethod: "POST" }];
+    const input = [{
+      resource: "IMAGE",
+      filename,
+      mimeType: "image/png",
+      httpMethod: "POST",
+    }];
     const data1 = await shopifyGQL(STAGED_UPLOADS_CREATE, { input });
     const target = data1?.stagedUploadsCreate?.stagedTargets?.[0];
     if (!target) {
@@ -125,7 +136,6 @@ export default async function handler(req, res) {
     const form = new FormData();
     for (const p of target.parameters) form.append(p.name, p.value);
     form.append("file", fileBlob, filename);
-
     const s3Resp = await fetch(target.url, { method: "POST", body: form });
     if (!s3Resp.ok) {
       const t = await s3Resp.text().catch(() => "");
@@ -147,19 +157,27 @@ export default async function handler(req, res) {
       }
     `;
     const data2 = await shopifyGQL(FILE_CREATE, {
-      files: [{ contentType: "IMAGE", originalSource: target.resourceUrl, alt: altText || "Brick Art submission" }]
+      files: [{
+        contentType: "IMAGE",
+        originalSource: target.resourceUrl,
+        alt: altText || "Brick Art submission",
+      }]
     });
 
-    let url = null;
+    // Prefer URL from fileCreate if present
     const created = data2?.fileCreate?.files?.[0] || null;
+    let url = null;
     if (created) {
       if (created.__typename === "MediaImage") url = created.image?.url || null;
       else if (created.__typename === "GenericFile") url = created.url || null;
     }
+
+    // If no URL returned (happens on some stores), look it up by filename
     if (!url) {
       console.warn("[BrickArt] fileCreate returned no URL; polling by filename…");
       url = await getFileUrlByFilename(filename);
     }
+
     if (!url) {
       console.error("[BrickArt] fileCreate userErrors:", data2?.fileCreate?.userErrors);
       throw new Error(JSON.stringify({ step: "fileCreate", errors: data2?.fileCreate?.userErrors || "no url after create" }));
@@ -170,7 +188,7 @@ export default async function handler(req, res) {
   }
 
   try {
-    // --- 5) Parse body ---
+    // --- 5) Parse body (tolerate stringified JSON) ---
     const body = typeof req.body === "string" ? JSON.parse(req.body) : (req.body || {});
     const {
       nickname,
@@ -178,11 +196,10 @@ export default async function handler(req, res) {
       grid,
       baseplate,
       totalBricks,
-      brickCounts,
+      brickCounts, // optional
       timestamp,
-      imageClean_b64,
-      imageLogo_b64,
-      userEmail,            // 👈 NEW
+      imageClean_b64, // RAW base64 (no data: prefix)
+      imageLogo_b64,  // RAW base64 (no data: prefix)
     } = body;
 
     if (!timestamp || (!imageClean_b64 && !imageLogo_b64)) {
@@ -193,17 +210,17 @@ export default async function handler(req, res) {
       nickname, category, grid, baseplate, totalBricks, timestamp,
       cleanLen: imageClean_b64?.length || 0,
       logoLen:  imageLogo_b64?.length  || 0,
-      userEmail: !!userEmail
     });
 
-    // --- 6) Upload images ---
-    const safe = `${String(timestamp).replace(/[:.Z\-]/g,"")}-${String(nickname||"anon").toLowerCase().replace(/[^a-z0-9]+/g,"-")}`.replace(/-+/g,"-");
-    const [cleanUrl, logoUrl] = await Promise.all([
-      uploadImageB64ToFiles(imageClean_b64, `${safe}-clean.png`, "Brick Art design (clean)"),
-      uploadImageB64ToFiles(imageLogo_b64,  `${safe}-logo.png`,  "Brick Art design (watermarked)"),
-    ]);
+    // --- 6) Upload images robustly ---
+    const safeNameBase =
+      `${String(timestamp).replace(/[:.Z\-]/g,"")}-${String(nickname||"anon").toLowerCase().replace(/[^a-z0-9]+/g,"-")}`.replace(/-+/g,"-");
 
-    // --- 7) Build article body ---
+    const cleanUrl = await uploadImageB64ToFiles(imageClean_b64, `${safeNameBase}-clean.png`, "Brick Art design (clean)");
+    const logoUrl  = await uploadImageB64ToFiles(imageLogo_b64,  `${safeNameBase}-logo.png`,  "Brick Art design (watermarked)");
+
+    // --- 7) Build article HTML ---
+    const escHTML = esc; // alias
     const meta = [
       grid ? `Grid: ${grid}` : "",
       baseplate ? `Baseplate: ${baseplate}` : "",
@@ -211,42 +228,62 @@ export default async function handler(req, res) {
     ].filter(Boolean).join(" · ");
 
     const body_html = `
-      <p><strong>Nickname:</strong> ${esc(nickname || "Anonymous")}</p>
-      ${userEmail ? `<p><strong>Submitted by:</strong> ${esc(userEmail)}</p>` : ""}
-      ${meta ? `<p>${esc(meta)}</p>` : ""}
+      <p><strong>Nickname:</strong> ${escHTML(nickname || "Anonymous")}</p>
+      ${meta ? `<p>${escHTML(meta)}</p>` : ""}
       ${cleanUrl ? `<p><img src="${cleanUrl}" alt="Brick Art design (clean)"/></p>` : ""}
-      ${logoUrl  ? `<p><img src="${logoUrl}"  alt="Brick Art design (watermarked)"/></p>` : ""}
+      ${logoUrl  ? `<p><img src="${logoUrl}" alt="Brick Art design (watermarked)"/></p>` : ""}
     `.trim();
 
-    // --- 8) Create blog article (publish now) ---
+    // --- 8) Create blog article — publish now (change to false if moderation needed) ---
     const articlePayload = {
       article: {
         title: `Brick Art submission — ${nickname || "Anonymous"} (${new Date(timestamp).toLocaleString()})`,
         body_html,
         tags: category || undefined,
-        published: true,
-        image: cleanUrl ? { src: cleanUrl } : undefined, // featured image for cards
+        published: true, // set to false if you want drafts pending approval
       },
     };
 
-    const ar = await shopifyREST(`/blogs/${BLOG_ID}/articles.json`, { method: "POST", body: JSON.stringify(articlePayload) });
+    const ar = await shopifyREST(`/blogs/${BLOG_ID}/articles.json`, {
+      method: "POST",
+      body: JSON.stringify(articlePayload),
+    });
+
     const articleText = await ar.text();
     let articleJson = {};
     try { articleJson = articleText ? JSON.parse(articleText) : {}; } catch {}
     if (!ar.ok) {
       console.error("[BrickArt] Blog create FAILED", ar.status, articleJson?.errors || articleText?.slice(0,300));
-      return res.status(500).json({ ok: false, error: "Failed to create blog post", detail: articleJson?.errors || articleText, cleanUrl, logoUrl });
+      return res.status(500).json({
+        ok: false,
+        error: "Failed to create blog post",
+        detail: articleJson?.errors || articleText,
+        cleanUrl,
+        logoUrl,
+      });
     }
 
     const articleId = articleJson?.article?.id;
     const handle = articleJson?.article?.handle;
     const blogHandle = articleJson?.article?.blog?.handle;
-    const storefrontUrl = (handle && blogHandle) ? `https://${STORE}/blogs/${blogHandle}/${handle}` : null;
+    const storefrontUrl = (handle && blogHandle)
+      ? `https://${STORE}/blogs/${blogHandle}/${handle}`
+      : null;
 
-    return res.status(200).json({ ok: true, articleId, cleanUrl, logoUrl, storefrontUrl });
+    return res.status(200).json({
+      ok: true,
+      articleId,
+      cleanUrl,
+      logoUrl,
+      storefrontUrl,
+    });
+
   } catch (err) {
     console.error("[BrickArt] Submit server error:", err);
-    return res.status(500).json({ ok: false, error: "Server error", detail: err?.message || String(err) });
+    return res.status(500).json({
+      ok: false,
+      error: "Server error",
+      detail: err?.message || String(err),
+    });
   }
 }
-
