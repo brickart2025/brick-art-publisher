@@ -57,37 +57,59 @@ export default async function handler(req, res) {
     return fetch(url, { ...init, headers });
   }
 
-  // ✅ Correct upload for REST /files.json (prevents 406)
-  async function uploadFile(b64, filename) {
-    if (!b64) return null;
-    const raw = toRawBase64(b64);
-    if (!raw) return null;
+  // --- Upload a base64 PNG to Shopify Files; return the CDN URL ---
+async function uploadFile(b64WithOrWithoutPrefix, filename) {
+  if (!b64WithOrWithoutPrefix) return null;
 
-    const body = {
-      file: {
-        attachment: raw,        // IMPORTANT: use 'content' (not 'attachment')
-        filename: filename
-        // keep minimal: extra fields like file_type can cause 406
-      }
-    };
+  // Strip any data URL prefix
+  const raw = String(b64WithOrWithoutPrefix).replace(/^data:image\/\w+;base64,/, "");
 
-    const r = await shopifyFetch("/files.json", {
-      method: "POST",
-      body: JSON.stringify(body),
-    });
-
-    const text = await r.text();
-    if (!r.ok) {
-      console.error("[BrickArt] File upload failed", r.status, r.statusText, text?.slice(0, 300));
-      throw new Error(`File upload failed: ${r.status} ${r.statusText}`);
+  const body = {
+    file: {
+      // IMPORTANT: Shopify REST expects `attachment` here for base64.
+      // Do NOT include file_type, mime_type, alt, etc. (those can trigger 406)
+      attachment: raw,
+      filename
     }
+  };
 
-    let json = {};
-    try { json = text ? JSON.parse(text) : {}; } catch {}
-    const url = json?.file?.url || json?.files?.[0]?.url || null;
-    console.log("[BrickArt] File stored:", url);
-    return url;
+  const r = await shopifyFetch("/files.json", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Accept": "application/json"
+    },
+    body: JSON.stringify(body),
+  });
+
+  const text = await r.text();
+  let json = null;
+  try { json = text ? JSON.parse(text) : null; } catch (_) {}
+
+  // Log a compact diagnostic line either way
+  console.log("[BrickArt] /files.json response", {
+    status: r.status,
+    ok: r.ok,
+    // show first 160 chars only to avoid log bloat
+    bodyPreview: (text || "").slice(0, 160)
+  });
+
+  if (!r.ok) {
+    // Surface the raw body so we can see Shopify’s reason
+    throw new Error(`File upload failed: ${r.status} ${r.statusText} :: ${text || "<empty>"}`);
   }
+
+  // Accept both shapes Shopify may return
+  const url =
+    (json && json.file && json.file.url) ||
+    (json && Array.isArray(json.files) && json.files[0] && json.files[0].url) ||
+    null;
+
+  if (!url) {
+    throw new Error("File upload succeeded but no URL returned.");
+  }
+  return url;
+}
 
   try {
     // ----- 5) Parse body -----
