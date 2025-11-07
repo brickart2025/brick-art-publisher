@@ -65,7 +65,7 @@ export default async function handler(req, res) {
 
     const body = {
       file: {
-        content: raw,        // IMPORTANT: use 'content' (not 'attachment')
+        attachment: raw,        // IMPORTANT: use 'content' (not 'attachment')
         filename: filename
         // keep minimal: extra fields like file_type can cause 406
       }
