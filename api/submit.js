@@ -215,6 +215,7 @@ export default async function handler(req, res) {
       timestamp,
       imageClean_b64,   // RAW base64 (no data: prefix)
       imageLogo_b64,    // RAW base64 (no data: prefix)
+      submitterEmail,   // <-- NEW (auto-captured in the frontend)
     } = body;
 
     if (!timestamp || (!imageClean_b64 && !imageLogo_b64)) {
@@ -225,6 +226,7 @@ export default async function handler(req, res) {
       nickname, category, grid, baseplate, totalBricks, timestamp,
       cleanLen: imageClean_b64?.length || 0,
       logoLen:  imageLogo_b64?.length  || 0,
+      hasEmail: !!submitterEmail,
     });
 
     // --- 6) Upload images robustly ---
@@ -235,45 +237,45 @@ export default async function handler(req, res) {
     const logoUrl  = await uploadImageB64ToFiles(imageLogo_b64,  `${safeNameBase}-logo.png`,  "Brick Art design (watermarked)");
 
     // --- 7) Build article HTML (now includes brick color tally) ---
-const escHTML = esc; // alias
-const meta = [
-  grid ? `Grid: ${grid}` : "",
-  baseplate ? `Baseplate: ${baseplate}` : "",
-  (typeof totalBricks === "number" ? `Total Bricks: ${totalBricks}` : ""),
-].filter(Boolean).join(" · ");
+    const escHTML = esc; // alias
+    const meta = [
+      grid ? `Grid: ${grid}` : "",
+      baseplate ? `Baseplate: ${baseplate}` : "",
+      (typeof totalBricks === "number" ? `Total Bricks: ${totalBricks}` : ""),
+    ].filter(Boolean).join(" · ");
 
-// normalize brickCounts (can arrive as object or JSON string)
-let countsObj = {};
-try {
-  if (brickCounts) {
-    countsObj = typeof brickCounts === "string" ? JSON.parse(brickCounts) : (brickCounts || {});
-  }
-} catch (_) { countsObj = {}; }
+    // normalize brickCounts (can arrive as object or JSON string)
+    let countsObj = {};
+    try {
+      if (brickCounts) {
+        countsObj = typeof brickCounts === "string" ? JSON.parse(brickCounts) : (brickCounts || {});
+      }
+    } catch (_) { countsObj = {}; }
 
-// make a small, neat list
-const entries = Object.entries(countsObj)
-  .filter(([, n]) => Number(n) > 0)
-  .sort((a, b) => Number(b[1]) - Number(a[1])); // highest first
+    // make a small, neat list
+    const entries = Object.entries(countsObj)
+      .filter(([, n]) => Number(n) > 0)
+      .sort((a, b) => Number(b[1]) - Number(a[1])); // highest first
 
-const countsHtml = entries.length
-  ? `
-    <div style="margin:8px 0 14px 0;">
-      <strong>Brick counts:</strong>
-      <ul style="margin:.35rem 0 0 0; padding-left:1.15rem; line-height:1.3;">
-        ${entries.map(([color, n]) => `<li>${escHTML(String(color))}: ${Number(n)}</li>`).join("")}
-      </ul>
-    </div>
-  `.trim()
-  : "";
+    const countsHtml = entries.length
+      ? `
+        <div style="margin:8px 0 14px 0;">
+          <strong>Brick counts:</strong>
+          <ul style="margin:.35rem 0 0 0; padding-left:1.15rem; line-height:1.3;">
+            ${entries.map(([color, n]) => `<li>${escHTML(String(color))}: ${Number(n)}</li>`).join("")}
+          </ul>
+        </div>
+      `.trim()
+      : "";
 
-// images under the text
-const body_html = `
-  <p><strong>Nickname:</strong> ${escHTML(nickname || "Anonymous")}</p>
-  ${meta ? `<p>${escHTML(meta)}</p>` : ""}
-  ${countsHtml}
-  ${cleanUrl ? `<p><img src="${cleanUrl}" alt="Brick Art design (clean)"/></p>` : ""}
-  ${logoUrl  ? `<p><img src="${logoUrl}" alt="Brick Art design (watermarked)"/></p>` : ""}
-`.trim();
+    // images under the text
+    const body_html = `
+      <p><strong>Nickname:</strong> ${escHTML(nickname || "Anonymous")}</p>
+      ${meta ? `<p>${escHTML(meta)}</p>` : ""}
+      ${countsHtml}
+      ${cleanUrl ? `<p><img src="${cleanUrl}" alt="Brick Art design (clean)"/></p>` : ""}
+      ${logoUrl  ? `<p><img src="${logoUrl}" alt="Brick Art design (watermarked)"/></p>` : ""}
+    `.trim();
 
     // --- 7b) Tags for gallery filtering ---
     const catTag   = category ? slug(category) : null;                 // e.g., "nature-science"
@@ -318,7 +320,7 @@ const body_html = `
 
     // --- 8b) Save brick color tally in a metafield (backend only) ---
     try {
-      if (articleId && brickCounts && Object.keys(brickCounts).length) {
+      if (articleId && countsObj && Object.keys(countsObj).length) {
         await shopifyREST(`/articles/${articleId}/metafields.json`, {
           method: "POST",
           body: JSON.stringify({
@@ -326,13 +328,34 @@ const body_html = `
               namespace: "brickart",
               key: "brick_counts",
               type: "json",
-              value: JSON.stringify(brickCounts),
+              value: JSON.stringify(countsObj),
             },
           }),
         });
+        console.log("[BrickArt] brick_counts metafield saved");
       }
     } catch (mfErr) {
-      console.error("[BrickArt] metafield save error", mfErr);
+      console.error("[BrickArt] brick_counts metafield error", mfErr);
+    }
+
+    // --- 8c) Save submitter email privately (if provided) ---
+    try {
+      if (articleId && submitterEmail) {
+        await shopifyREST(`/articles/${articleId}/metafields.json`, {
+          method: "POST",
+          body: JSON.stringify({
+            metafield: {
+              namespace: "brickart",
+              key: "submitter_email",
+              type: "single_line_text_field",
+              value: String(submitterEmail).trim(),
+            },
+          }),
+        });
+        console.log("[BrickArt] submitter_email metafield saved");
+      }
+    } catch (mfErr) {
+      console.error("[BrickArt] submitter_email metafield error", mfErr);
     }
 
     const storefrontUrl = (handle && blogHandle)
@@ -345,6 +368,7 @@ const body_html = `
       cleanUrl,
       logoUrl,
       storefrontUrl,
+      emailSaved: !!submitterEmail,
     });
 
   } catch (err) {
