@@ -234,20 +234,46 @@ export default async function handler(req, res) {
     const cleanUrl = await uploadImageB64ToFiles(imageClean_b64, `${safeNameBase}-clean.png`, "Brick Art design (clean)");
     const logoUrl  = await uploadImageB64ToFiles(imageLogo_b64,  `${safeNameBase}-logo.png`,  "Brick Art design (watermarked)");
 
-    // --- 7) Build article HTML ---
-    const escHTML = esc; // alias
-    const meta = [
-      grid ? `Grid: ${grid}` : "",
-      baseplate ? `Baseplate: ${baseplate}` : "",
-      (typeof totalBricks === "number" ? `Total Bricks: ${totalBricks}` : ""),
-    ].filter(Boolean).join(" · ");
+    // --- 7) Build article HTML (now includes brick color tally) ---
+const escHTML = esc; // alias
+const meta = [
+  grid ? `Grid: ${grid}` : "",
+  baseplate ? `Baseplate: ${baseplate}` : "",
+  (typeof totalBricks === "number" ? `Total Bricks: ${totalBricks}` : ""),
+].filter(Boolean).join(" · ");
 
-    const body_html = `
-      <p><strong>Nickname:</strong> ${escHTML(nickname || "Anonymous")}</p>
-      ${meta ? `<p>${escHTML(meta)}</p>` : ""}
-      ${cleanUrl ? `<p><img src="${cleanUrl}" alt="Brick Art design (clean)"/></p>` : ""}
-      ${logoUrl  ? `<p><img src="${logoUrl}" alt="Brick Art design (watermarked)"/></p>` : ""}
-    `.trim();
+// normalize brickCounts (can arrive as object or JSON string)
+let countsObj = {};
+try {
+  if (brickCounts) {
+    countsObj = typeof brickCounts === "string" ? JSON.parse(brickCounts) : (brickCounts || {});
+  }
+} catch (_) { countsObj = {}; }
+
+// make a small, neat list
+const entries = Object.entries(countsObj)
+  .filter(([, n]) => Number(n) > 0)
+  .sort((a, b) => Number(b[1]) - Number(a[1])); // highest first
+
+const countsHtml = entries.length
+  ? `
+    <div style="margin:8px 0 14px 0;">
+      <strong>Brick counts:</strong>
+      <ul style="margin:.35rem 0 0 0; padding-left:1.15rem; line-height:1.3;">
+        ${entries.map(([color, n]) => `<li>${escHTML(String(color))}: ${Number(n)}</li>`).join("")}
+      </ul>
+    </div>
+  `.trim()
+  : "";
+
+// images under the text
+const body_html = `
+  <p><strong>Nickname:</strong> ${escHTML(nickname || "Anonymous")}</p>
+  ${meta ? `<p>${escHTML(meta)}</p>` : ""}
+  ${countsHtml}
+  ${cleanUrl ? `<p><img src="${cleanUrl}" alt="Brick Art design (clean)"/></p>` : ""}
+  ${logoUrl  ? `<p><img src="${logoUrl}" alt="Brick Art design (watermarked)"/></p>` : ""}
+`.trim();
 
     // --- 7b) Tags for gallery filtering ---
     const catTag   = category ? slug(category) : null;                 // e.g., "nature-science"
