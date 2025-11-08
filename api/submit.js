@@ -35,7 +35,22 @@ export default async function handler(req, res) {
   const GQL_URL   = `https://${STORE}/admin/api/2024-07/graphql.json`;
 
   // --- 4) Helpers ---
-  const esc = (s = "") => String(s).replace(/[&<>"]/g, m => ({ "&":"&amp;","<":"&lt;","<":"&lt;",">":"&gt;",'"':"&quot;" }[m]));
+  const esc = (s = "") =>
+    String(s).replace(/[&<>"]/g, m => ({
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+    }[m]));
+
+  // turn "Nature / Science" → "nature-science", "Blue 16x16" → "blue-16x16"
+  const slug = (s = "") =>
+    String(s)
+      .toLowerCase()
+      .replace(/&/g, "and")
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "");
+
   const toRawBase64 = (src = "") => src.replace(/^data:image\/[a-zA-Z0-9.+-]+;base64,/, "").trim();
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
@@ -196,10 +211,10 @@ export default async function handler(req, res) {
       grid,
       baseplate,
       totalBricks,
-      brickCounts, // optional
+      brickCounts,      // optional { "Blue": 123, ... }
       timestamp,
-      imageClean_b64, // RAW base64 (no data: prefix)
-      imageLogo_b64,  // RAW base64 (no data: prefix)
+      imageClean_b64,   // RAW base64 (no data: prefix)
+      imageLogo_b64,    // RAW base64 (no data: prefix)
     } = body;
 
     if (!timestamp || (!imageClean_b64 && !imageLogo_b64)) {
@@ -234,13 +249,21 @@ export default async function handler(req, res) {
       ${logoUrl  ? `<p><img src="${logoUrl}" alt="Brick Art design (watermarked)"/></p>` : ""}
     `.trim();
 
-    // --- 8) Create blog article — publish now (change to false if moderation needed) ---
+    // --- 7b) Tags for gallery filtering ---
+    const catTag   = category ? slug(category) : null;                 // e.g., "nature-science"
+    const sizeTag  = grid && (/\b32\b/.test(String(grid)) ? "32x32"
+                      : /\b16\b/.test(String(grid)) ? "16x16"
+                      : String(grid));
+    const plateTag = baseplate ? `plate-${slug(baseplate)}` : null;    // e.g., "plate-blue-16x16"
+    const tags     = [catTag, sizeTag, plateTag].filter(Boolean).join(", ");
+
+    // --- 8) Create blog article — publish now ---
     const articlePayload = {
       article: {
         title: `Brick Art submission — ${nickname || "Anonymous"} (${new Date(timestamp).toLocaleString()})`,
         body_html,
-        tags: category || undefined,
-        published: true, // set to false if you want drafts pending approval
+        tags,                 // category + size + baseplate
+        published: true,      // set false if you want moderation
       },
     };
 
@@ -263,9 +286,29 @@ export default async function handler(req, res) {
       });
     }
 
-    const articleId = articleJson?.article?.id;
-    const handle = articleJson?.article?.handle;
+    const articleId  = articleJson?.article?.id;
+    const handle     = articleJson?.article?.handle;
     const blogHandle = articleJson?.article?.blog?.handle;
+
+    // --- 8b) Save brick color tally in a metafield (backend only) ---
+    try {
+      if (articleId && brickCounts && Object.keys(brickCounts).length) {
+        await shopifyREST(`/articles/${articleId}/metafields.json`, {
+          method: "POST",
+          body: JSON.stringify({
+            metafield: {
+              namespace: "brickart",
+              key: "brick_counts",
+              type: "json",
+              value: JSON.stringify(brickCounts),
+            },
+          }),
+        });
+      }
+    } catch (mfErr) {
+      console.error("[BrickArt] metafield save error", mfErr);
+    }
+
     const storefrontUrl = (handle && blogHandle)
       ? `https://${STORE}/blogs/${blogHandle}/${handle}`
       : null;
