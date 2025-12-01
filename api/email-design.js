@@ -1,9 +1,7 @@
 // /api/email-design.js
-// Vercel serverless function for emailing Brick Art design PDFs via SendGrid HTTP API (using axios, ESM)
+// Vercel serverless function for emailing Brick Art design PDFs via SendGrid HTTP API
+// Uses built-in fetch (no axios / no @sendgrid/mail)
 
-import axios from "axios";
-
-// --- Config from environment variables ---
 const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY;
 const FROM_EMAIL = process.env.FROM_EMAIL || "designs@brick-art.com";
 const BCC_EMAIL = process.env.BCC_EMAIL || "gallery@brick-art.com";
@@ -136,7 +134,6 @@ export default async function handler(req, res) {
       <p>Have fun building!</p>
     `;
 
-    // Build SendGrid v3 API payload
     const personalization = {
       to: [{ email }],
     };
@@ -162,24 +159,31 @@ export default async function handler(req, res) {
       ],
     };
 
-    await axios.post("https://api.sendgrid.com/v3/mail/send", payload, {
+    const resp = await fetch("https://api.sendgrid.com/v3/mail/send", {
+      method: "POST",
       headers: {
         Authorization: `Bearer ${SENDGRID_API_KEY}`,
         "Content-Type": "application/json",
       },
+      body: JSON.stringify(payload),
     });
+
+    if (!resp.ok) {
+      const errText = await resp.text().catch(() => "");
+      console.error(
+        "[BrickArt] SendGrid error:",
+        resp.status,
+        resp.statusText,
+        errText
+      );
+      return res
+        .status(500)
+        .json({ ok: false, error: "SendGrid error" });
+    }
 
     return res.status(200).json({ ok: true });
   } catch (err) {
     console.error("[BrickArt] /api/email-design error:", err?.message || err);
-    if (err.response) {
-      console.error(
-        "[BrickArt] SendGrid status:",
-        err.response.status,
-        "data:",
-        err.response.data
-      );
-    }
     return res.status(500).json({ ok: false, error: "Server error" });
   }
 }
