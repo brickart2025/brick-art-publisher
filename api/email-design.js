@@ -1,23 +1,20 @@
 // /api/email-design.js
-// Vercel serverless function for emailing Brick Art design PDFs via SendGrid
+// Vercel serverless function for emailing Brick Art design PDFs via SendGrid HTTP API (using axios)
 
-import sgMail from "@sendgrid/mail";
+const axios = require("axios");
 
 // --- Config from environment variables ---
 const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY;
 const FROM_EMAIL = process.env.FROM_EMAIL || "designs@brick-art.com";
 const BCC_EMAIL = process.env.BCC_EMAIL || "gallery@brick-art.com";
 
-// Initialize SendGrid if key is present
 if (!SENDGRID_API_KEY) {
   console.error(
     "[BrickArt] SENDGRID_API_KEY is not set. Email route will fail until this is configured."
   );
-} else {
-  sgMail.setApiKey(SENDGRID_API_KEY);
 }
 
-export default async function handler(req, res) {
+module.exports = async function handler(req, res) {
   // --------------- CORS CONFIGURATION ---------------
   const allowedOrigins = [
     "https://www.brick-art.com",
@@ -56,7 +53,7 @@ export default async function handler(req, res) {
   try {
     for await (const chunk of req) {
       rawBody += chunk;
-      // safety guard ~4MB (Vercel limit is around this)
+      // safety guard ~4MB
       if (rawBody.length > 4 * 1024 * 1024) {
         return res
           .status(413)
@@ -139,13 +136,22 @@ export default async function handler(req, res) {
       <p>Have fun building!</p>
     `;
 
-    const msg = {
-      to: email,
-      from: FROM_EMAIL,
-      bcc: BCC_EMAIL,
+    // Build SendGrid v3 API payload
+    const personalization = {
+      to: [{ email }],
+    };
+    if (BCC_EMAIL) {
+      personalization.bcc = [{ email: BCC_EMAIL }];
+    }
+
+    const payload = {
+      personalizations: [personalization],
+      from: { email: FROM_EMAIL },
       subject,
-      text: textBody,
-      html: htmlBody,
+      content: [
+        { type: "text/plain", value: textBody },
+        { type: "text/html", value: htmlBody },
+      ],
       attachments: [
         {
           content: pdfBase64,
@@ -156,17 +162,24 @@ export default async function handler(req, res) {
       ],
     };
 
-    await sgMail.send(msg);
+    await axios.post("https://api.sendgrid.com/v3/mail/send", payload, {
+      headers: {
+        Authorization: `Bearer ${SENDGRID_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+    });
 
     return res.status(200).json({ ok: true });
   } catch (err) {
-    console.error("[BrickArt] /api/email-design error:", err);
-    if (err.response && err.response.body) {
+    console.error("[BrickArt] /api/email-design error:", err?.message || err);
+    if (err.response) {
       console.error(
-        "[BrickArt] SendGrid response body:",
-        err.response.body
+        "[BrickArt] SendGrid status:",
+        err.response.status,
+        "data:",
+        err.response.data
       );
     }
     return res.status(500).json({ ok: false, error: "Server error" });
   }
-}
+};
