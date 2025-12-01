@@ -10,26 +10,28 @@ const FROM_EMAIL = process.env.FROM_EMAIL || "designs@brick-art.com";
 const BCC_EMAIL = process.env.BCC_EMAIL || "gallery@brick-art.com";
 
 // Basic CORS – allow your Shopify storefront to call this route
-const ALLOWED_ORIGIN = "https://www.brick-art.com";
+// --------------- CORS CONFIGURATION ---------------
+// Allow frontend calls from your Shopify storefront
 
-if (!SENDGRID_API_KEY) {
-  console.error(
-    "[BrickArt] SENDGRID_API_KEY is not set. Email route will fail until this is configured."
-  );
-} else {
-  sgMail.setApiKey(SENDGRID_API_KEY);
+const allowedOrigins = [
+  "https://www.brick-art.com",
+  "https://brick-art.com"
+];
+
+res.setHeader("Access-Control-Allow-Credentials", "true");
+res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+// Echo back the requesting origin ONLY if it's allowed
+const origin = req.headers.origin;
+if (allowedOrigins.includes(origin)) {
+  res.setHeader("Access-Control-Allow-Origin", origin);
 }
 
-export default async function handler(req, res) {
-  // --- CORS headers (for browser requests from your storefront) ---
-  res.setHeader("Access-Control-Allow-Origin", ALLOWED_ORIGIN);
-  res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-
-  if (req.method === "OPTIONS") {
-    // Preflight request
-    return res.status(200).end();
-  }
+// Preflight (OPTIONS)
+if (req.method === "OPTIONS") {
+  return res.status(200).end();
+}
 
   if (req.method !== "POST") {
     return res.status(405).json({ ok: false, error: "Method not allowed" });
