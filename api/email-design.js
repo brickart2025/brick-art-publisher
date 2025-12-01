@@ -1,7 +1,7 @@
 // /api/email-design.js
-// Vercel serverless function for emailing Brick Art design PDFs via SendGrid HTTP API (using axios)
+// Vercel serverless function for emailing Brick Art design PDFs via SendGrid HTTP API (using axios, ESM)
 
-const axios = require("axios");
+import axios from "axios";
 
 // --- Config from environment variables ---
 const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY;
@@ -14,7 +14,7 @@ if (!SENDGRID_API_KEY) {
   );
 }
 
-module.exports = async function handler(req, res) {
+export default async function handler(req, res) {
   // --------------- CORS CONFIGURATION ---------------
   const allowedOrigins = [
     "https://www.brick-art.com",
@@ -182,4 +182,4 @@ module.exports = async function handler(req, res) {
     }
     return res.status(500).json({ ok: false, error: "Server error" });
   }
-};
+}
