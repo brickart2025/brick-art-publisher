@@ -3,38 +3,46 @@
 
 import sgMail from "@sendgrid/mail";
 
+// --- Config from environment variables ---
 const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY;
-
-// Default FROM / BCC, can be overridden with env vars
 const FROM_EMAIL = process.env.FROM_EMAIL || "designs@brick-art.com";
 const BCC_EMAIL = process.env.BCC_EMAIL || "gallery@brick-art.com";
 
-// Basic CORS – allow your Shopify storefront to call this route
-// --------------- CORS CONFIGURATION ---------------
-// Allow frontend calls from your Shopify storefront
-
-const allowedOrigins = [
-  "https://www.brick-art.com",
-  "https://brick-art.com"
-];
-
-res.setHeader("Access-Control-Allow-Credentials", "true");
-res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-
-// Echo back the requesting origin ONLY if it's allowed
-const origin = req.headers.origin;
-if (allowedOrigins.includes(origin)) {
-  res.setHeader("Access-Control-Allow-Origin", origin);
+// Initialize SendGrid if key is present
+if (!SENDGRID_API_KEY) {
+  console.error(
+    "[BrickArt] SENDGRID_API_KEY is not set. Email route will fail until this is configured."
+  );
+} else {
+  sgMail.setApiKey(SENDGRID_API_KEY);
 }
 
-// Preflight (OPTIONS)
-if (req.method === "OPTIONS") {
-  return res.status(200).end();
-}
+export default async function handler(req, res) {
+  // --------------- CORS CONFIGURATION ---------------
+  const allowedOrigins = [
+    "https://www.brick-art.com",
+    "https://brick-art.com",
+  ];
+
+  const origin = req.headers.origin;
+  if (allowedOrigins.includes(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+  }
+
+  res.setHeader("Access-Control-Allow-Credentials", "true");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+  // Preflight (OPTIONS)
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+  // --------------------------------------------------
 
   if (req.method !== "POST") {
-    return res.status(405).json({ ok: false, error: "Method not allowed" });
+    return res
+      .status(405)
+      .json({ ok: false, error: "Method not allowed" });
   }
 
   if (!SENDGRID_API_KEY) {
@@ -45,12 +53,12 @@ if (req.method === "OPTIONS") {
 
   try {
     const {
-      email,          // recipient (user)
-      nickname,       // optional design name / student name
-      whichGrid,      // "16" or "32"
-      baseplate,      // baseplate label (e.g. "Green 16x16")
-      totalBricks,    // integer
-      pdfBase64,      // PDF as base64 (no data: prefix)
+      email,       // recipient (user)
+      nickname,    // optional design name / student name
+      whichGrid,   // "16" or "32"
+      baseplate,   // baseplate label
+      totalBricks, // integer
+      pdfBase64,   // PDF as base64 (no data: prefix)
     } = req.body || {};
 
     if (!email || !pdfBase64) {
@@ -64,6 +72,7 @@ if (req.method === "OPTIONS") {
     const filename = `BrickArt-${safeNickname}-${sizeLabel}.pdf`;
 
     const subject = "Your Brick Art mosaic design";
+
     const textBody = [
       "Here is the PDF of your Brick Art mosaic design.",
       "",
@@ -114,12 +123,12 @@ if (req.method === "OPTIONS") {
     return res.status(200).json({ ok: true });
   } catch (err) {
     console.error("[BrickArt] /api/email-design error:", err);
-
-    // SendGrid sometimes returns an array of errors in err.response.body
     if (err.response && err.response.body) {
-      console.error("[BrickArt] SendGrid response body:", err.response.body);
+      console.error(
+        "[BrickArt] SendGrid response body:",
+        err.response.body
+      );
     }
-
     return res.status(500).json({ ok: false, error: "Server error" });
   }
 }
