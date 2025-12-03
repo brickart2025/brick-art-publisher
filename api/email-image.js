@@ -101,30 +101,73 @@ export default async function handler(req, res) {
     );
     const sizeLabel = grid ? `${grid}x${grid}` : "mosaic";
 
-    const brickLines = brickCounts
+    // Build brick breakdown for text + HTML
+    const brickEntries = brickCounts
       ? Object.entries(brickCounts)
-          .map(([id, n]) => `${id}: ${n}`)
-          .join(", ")
+      : [];
+
+    const brickLinesArray = brickEntries.map(
+      ([id, n]) => `${id}: ${n}`
+    );
+
+    const brickListText = brickEntries.length
+      ? ["Brick counts:", ...brickLinesArray.map((line) => `- ${line}`)].join("\n")
+      : "";
+
+    const brickListHtml = brickEntries.length
+      ? `<p><strong>Brick counts:</strong></p><ul>${brickEntries
+          .map(
+            ([id, n]) =>
+              `<li><strong>${id}:</strong> ${n}</li>`
+          )
+          .join("")}</ul>`
       : "";
 
     const subject = "Your Brick Art mosaic design";
 
+    // --------- TEXT BODY ---------
     const textBodyLines = [
+      "🎉 Your Brick Art mosaic is ready!",
+      "",
       "Here is a PNG image of your Brick Art mosaic design.",
       "",
       grid ? `Grid: ${sizeLabel}` : "",
       typeof totalBricks === "number"
         ? `Total Bricks: ${totalBricks}`
         : "",
-      brickLines ? `Brick counts: ${brickLines}` : "",
+      brickListText,
       "",
       "Have fun building!",
+      "",
+      "🧱 About Brick Art",
+      "Brick Art turns your designs into real brick mosaics.",
+      "Explore kits, digital tools, and more at https://www.brick-art.com",
+      "",
+      "📲 Share your design & join the Brick Art Challenge!",
+      "Build your best mosaic using your Brick Art kit, snap a clear photo, and share it on Instagram, TikTok, or Facebook with the hashtag #BrickArtChallenge.",
+      "Follow @BrickArtOfficial so we can see your entry.",
+      "",
+      "Monthly winners earn new design kits and surprise Brick Art prizes.",
+      "Each season, one builder wins a Mega Brick Art Bundle packed with creative goodies!",
+      "",
+      "Every design is unique — whether it’s a portrait, a pattern, or something wild, we want to see it!",
+      "The more you share, the more chances you have to win.",
+      "Be sure your profile is public so we can see your entry.",
+      "",
+      "👉 Ready to build, snap, and share?",
+      "Join the #BrickArtChallenge today and bring your mosaics to life!",
+      "",
+      "Thanks again for designing with Brick Art!",
     ].filter(Boolean);
 
     const textBody = textBodyLines.join("\n");
 
+    // --------- HTML BODY ---------
     const htmlBody = `
+      <p><strong>🎉 Your Brick Art mosaic is ready!</strong></p>
+
       <p>Here is a PNG image of your Brick Art mosaic design.</p>
+
       <p>
         ${grid ? `<strong>Grid:</strong> ${sizeLabel}<br/>` : ""}
         ${
@@ -132,13 +175,64 @@ export default async function handler(req, res) {
             ? `<strong>Total Bricks:</strong> ${totalBricks}<br/>`
             : ""
         }
-        ${
-          brickLines
-            ? `<strong>Brick counts:</strong> ${brickLines}<br/>`
-            : ""
-        }
       </p>
+
+      ${brickListHtml || ""}
+
       <p>Have fun building!</p>
+
+      <hr/>
+
+      <p>
+        <strong>🧱 About Brick Art</strong><br/>
+        Brick Art turns your creativity into hands-on mosaic fun at home and in the classroom.
+        Explore kits, digital tools, and more at
+        <a href="https://www.brick-art.com" target="_blank">www.Brick-Art.com</a>.
+      </p>
+
+      <hr/>
+
+      <p><strong>The Brick Art Challenge — Turn your creativity into prizes!</strong></p>
+
+      <p>
+        You’ve got the MEGA MOSAIC BUNDLE BOX or a BRICK ART MOSAIC DESIGN KIT — now it’s your turn
+        to show the world what you can build. Share your mosaic masterpiece on social media for a
+        chance to win exclusive Brick Art design kits and other awesome prizes.
+      </p>
+
+      <p><strong>🎉 How to Enter</strong></p>
+      <ul>
+        <li>Build your best mosaic design using your Brick Art kit.</li>
+        <li>Earn extra points by having related "props" in your photo!</li>
+        <li>Snap a clear photo of your creation.</li>
+        <li>Share it on Instagram, TikTok, or Facebook with the hashtag <strong>#BrickArtChallenge</strong>.</li>
+        <li>Follow <strong>@BrickArtOfficial</strong> so we can see your entry.</li>
+      </ul>
+
+      <p><strong>🏆 Prizes</strong></p>
+      <ul>
+        <li><strong>Monthly Winners</strong> – New design kits &amp; surprise Brick Art prizes.</li>
+        <li><strong>Grand Prize</strong> – One lucky builder each season wins a
+          <em>Mega Brick Art Bundle</em> packed with creative goodies!</li>
+      </ul>
+
+      <p>
+        <strong>💡 Inspiration</strong><br/>
+        Need ideas to get started? Check out our exclusive design gallery (only available to bundle
+        owners) for patterns, guides, and creative prompts.
+      </p>
+
+      <p><strong>📲 Don’t Forget!</strong></p>
+      <ul>
+        <li>Every design is unique — whether it’s a portrait, a pattern, or something wild, we want to see it!</li>
+        <li>The more you share, the more chances you have to win.</li>
+        <li>Be sure your profile is public so we can see your entry.</li>
+      </ul>
+
+      <p>
+        <strong>👉 Ready to build, snap, and share?</strong><br/>
+        Join the <strong>#BrickArtChallenge</strong> today and bring your mosaics to life!
+      </p>
     `;
 
     const payload = {
