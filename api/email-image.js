@@ -1,10 +1,8 @@
 // /api/email-image.js
-// Vercel serverless function for emailing a PNG (imageLogo) via SendGrid HTTP API
+// Vercel function to email a PNG of the Brick Art design via SendGrid HTTP API
 
 const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY;
 const FROM_EMAIL = process.env.FROM_EMAIL || "designs@brick-art.com";
-// Leave blank if you don't want BCC
-const BCC_EMAIL = process.env.BCC_EMAIL || "";
 
 if (!SENDGRID_API_KEY) {
   console.error(
@@ -13,30 +11,31 @@ if (!SENDGRID_API_KEY) {
 }
 
 export default async function handler(req, res) {
-  // --------------- CORS (VERY SIMPLE) ---------------
-  const origin = req.headers.origin;
+  // --------------- CORS CONFIGURATION ---------------
+  const allowedOrigins = [
+    "https://www.brick-art.com",
+    "https://brick-art.com",
+  ];
 
-  // Allow both storefront domains
-  if (
-    origin === "https://www.brick-art.com" ||
-    origin === "https://brick-art.com"
-  ) {
+  const origin = req.headers.origin;
+  if (allowedOrigins.includes(origin)) {
     res.setHeader("Access-Control-Allow-Origin", origin);
   }
 
-  res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Credentials", "true");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
-  // Preflight (OPTIONS) — just say OK
+  // Preflight (OPTIONS)
   if (req.method === "OPTIONS") {
     return res.status(200).end();
   }
   // --------------------------------------------------
 
   if (req.method !== "POST") {
-    return res.status(405).json({ ok: false, error: "Method not allowed" });
+    return res
+      .status(405)
+      .json({ ok: false, error: "Method not allowed" });
   }
 
   if (!SENDGRID_API_KEY) {
@@ -45,13 +44,13 @@ export default async function handler(req, res) {
       .json({ ok: false, error: "Email service not configured" });
   }
 
-  // ---- Read & parse JSON body manually (with size guard) ----
+  // ---- Read & parse JSON body manually ----
   let rawBody = "";
   try {
     for await (const chunk of req) {
       rawBody += chunk;
-      // safety guard ~4MB
-      if (rawBody.length > 4 * 1024 * 1024) {
+      // safety guard ~2MB (image should be small)
+      if (rawBody.length > 2 * 1024 * 1024) {
         return res
           .status(413)
           .json({ ok: false, error: "Payload too large" });
@@ -69,15 +68,17 @@ export default async function handler(req, res) {
     data = rawBody ? JSON.parse(rawBody) : {};
   } catch (e) {
     console.error("[BrickArt] Invalid JSON body:", e);
-    return res.status(400).json({ ok: false, error: "Invalid JSON body" });
+    return res
+      .status(400)
+      .json({ ok: false, error: "Invalid JSON body" });
   }
 
   const {
-    email,        // recipient (user)
-    nickname,     // optional nickname / handle
-    whichGrid,    // "16" or "32"
-    baseplate,    // baseplate label
-    totalBricks,  // integer
+    email,
+    nickname,
+    grid,
+    totalBricks,
+    brickCounts,  // object { red: 10, blue: 5, ... }
     imageBase64,  // PNG as base64 (no data: prefix)
   } = data || {};
 
@@ -88,10 +89,9 @@ export default async function handler(req, res) {
       "imageBase64 present:",
       !!imageBase64
     );
-    return res.status(400).json({
-      ok: false,
-      error: "Missing 'email' or 'imageBase64' in body",
-    });
+    return res
+      .status(400)
+      .json({ ok: false, error: "Missing 'email' or 'imageBase64' in body" });
   }
 
   try {
@@ -99,48 +99,54 @@ export default async function handler(req, res) {
       /[^a-z0-9_\-]+/gi,
       "_"
     );
-    const sizeLabel = whichGrid ? `${whichGrid}x${whichGrid}` : "mosaic";
-    const filename = `BrickArt-${safeNickname}-${sizeLabel}.png`;
+    const sizeLabel = grid ? `${grid}x${grid}` : "mosaic";
+
+    const brickLines = brickCounts
+      ? Object.entries(brickCounts)
+          .map(([id, n]) => `${id}: ${n}`)
+          .join(", ")
+      : "";
 
     const subject = "Your Brick Art mosaic design";
 
-    const textBody = [
-      "Here is the PNG image of your Brick Art mosaic design.",
+    const textBodyLines = [
+      "Here is a PNG image of your Brick Art mosaic design.",
       "",
-      whichGrid ? `Grid: ${sizeLabel}` : "",
-      baseplate ? `Baseplate: ${baseplate}` : "",
+      grid ? `Grid: ${sizeLabel}` : "",
       typeof totalBricks === "number"
         ? `Total Bricks: ${totalBricks}`
         : "",
+      brickLines ? `Brick counts: ${brickLines}` : "",
       "",
       "Have fun building!",
-    ]
-      .filter(Boolean)
-      .join("\n");
+    ].filter(Boolean);
+
+    const textBody = textBodyLines.join("\n");
 
     const htmlBody = `
-      <p>Here is the PNG image of your Brick Art mosaic design.</p>
+      <p>Here is a PNG image of your Brick Art mosaic design.</p>
       <p>
-        ${whichGrid ? `<strong>Grid:</strong> ${sizeLabel}<br/>` : ""}
-        ${baseplate ? `<strong>Baseplate:</strong> ${baseplate}<br/>` : ""}
+        ${grid ? `<strong>Grid:</strong> ${sizeLabel}<br/>` : ""}
         ${
           typeof totalBricks === "number"
             ? `<strong>Total Bricks:</strong> ${totalBricks}<br/>`
+            : ""
+        }
+        ${
+          brickLines
+            ? `<strong>Brick counts:</strong> ${brickLines}<br/>`
             : ""
         }
       </p>
       <p>Have fun building!</p>
     `;
 
-    const personalization = {
-      to: [{ email }],
-    };
-    if (BCC_EMAIL) {
-      personalization.bcc = [{ email: BCC_EMAIL }];
-    }
-
     const payload = {
-      personalizations: [personalization],
+      personalizations: [
+        {
+          to: [{ email }],
+        },
+      ],
       from: { email: FROM_EMAIL },
       subject,
       content: [
@@ -150,7 +156,7 @@ export default async function handler(req, res) {
       attachments: [
         {
           content: imageBase64,
-          filename,
+          filename: `BrickArt-${safeNickname}-${sizeLabel}.png`,
           type: "image/png",
           disposition: "attachment",
         },
