@@ -129,7 +129,7 @@ export default async function handler(req, res) {
     const textBodyLines = [
       "🎉 Your Brick Art mosaic is ready!",
       "",
-      "Here is a PNG image of your Brick Art mosaic design.",
+      "Your Brick Art mosaic design is attached to this email.",
       "",
       grid ? `Grid: ${sizeLabel}` : "",
       typeof totalBricks === "number"
@@ -166,8 +166,10 @@ export default async function handler(req, res) {
     const htmlBody = `
       <p><strong>🎉 Your Brick Art mosaic is ready!</strong></p>
 
-      <p>Here is a PNG image of your Brick Art mosaic design.</p>
-
+      <p>Your Brick Art mosaic design is attached to this email. 
+      Remember to check out the Brick Art Gallery page at 
+      <a href="https://www.brick-art.com/pages/brick-art-gallery" target="_blank">www.Brick-Art.com/pages/brick-art-gallery</a>.
+      Thanks for designing with Brick Art!</p>
       <p>
         ${grid ? `<strong>Grid:</strong> ${sizeLabel}<br/>` : ""}
         ${
@@ -184,7 +186,7 @@ export default async function handler(req, res) {
       <hr/>
 
       <p>
-        <strong>🧱 About Brick Art</strong><br/>
+        <strong>About Brick Art</strong><br/>
         Brick Art turns your creativity into hands-on mosaic fun at home and in the classroom.
         Explore kits, digital tools, and more at
         <a href="https://www.brick-art.com" target="_blank">www.Brick-Art.com</a>.
@@ -195,8 +197,7 @@ export default async function handler(req, res) {
       <p><strong>The Brick Art Challenge — Turn your creativity into prizes!</strong></p>
 
       <p>
-        You’ve got the MEGA MOSAIC BUNDLE BOX or a BRICK ART MOSAIC DESIGN KIT — now it’s your turn
-        to show the world what you can build. Share your mosaic masterpiece on social media for a
+        Share your mosaic masterpiece on social media for a
         chance to win exclusive Brick Art design kits and other awesome prizes.
       </p>
 
