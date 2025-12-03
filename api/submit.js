@@ -391,28 +391,31 @@ export default async function handler(req, res) {
     const plateTag = baseplate ? `plate-${slug(baseplate)}` : null; // e.g. "plate-blue-16x16"
     const tags = [catTag, sizeTag, plateTag].filter(Boolean).join(", ");
 
-    // --- 8) Create blog article (published) ---
-    const articlePayload = {
-      article: {
-        title: `Brick Art submission — ${nickname || "Anonymous"} (${new Date(
-          timestamp
-        ).toLocaleString()})`,
-        body_html,
-        tags,
-        published: true,
-      },
-    };
+  // --- 8) Create blog article (hidden by default) ---
+const articlePayload = {
+  article: {
+    title: `Brick Art submission — ${nickname || "Anonymous"} (${new Date(
+      timestamp
+    ).toLocaleString()})`,
+    body_html,
+    tags,
 
-    const ar = await shopifyREST(`/blogs/${BLOG_ID}/articles.json`, {
-      method: "POST",
-      body: JSON.stringify(articlePayload),
-    });
+    // keep new submissions OFF the public gallery until you approve them
+    published: false,
+    published_at: null,
+  },
+};
 
-    const articleText = await ar.text();
-    let articleJson = {};
-    try {
-      articleJson = articleText ? JSON.parse(articleText) : {};
-    } catch {}
+const ar = await shopifyREST(`/blogs/${BLOG_ID}/articles.json`, {
+  method: "POST",
+  body: JSON.stringify(articlePayload),
+});
+
+const articleText = await ar.text();
+let articleJson = {};
+try {
+  articleJson = articleText ? JSON.parse(articleText) : {};
+} catch {}
 
     if (!ar.ok) {
       console.error(
